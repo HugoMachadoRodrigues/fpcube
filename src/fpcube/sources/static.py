@@ -27,7 +27,7 @@ DRAIN = {"Excessively drained": 1, "Somewhat excessively drained": 2, "Well drai
          "Moderately well drained": 4, "Somewhat poorly drained": 5, "Poorly drained": 6,
          "Very poorly drained": 7, "Subaqueous": 8}
 FLOOD = {"None": 0, "Very rare": 1, "Rare": 2, "Occasional": 3, "Frequent": 4, "Very frequent": 5}
-CCAP_WET = (13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23)   # palustrine and estuarine wetland classes
+CCAP_WET = (13, 14, 15, 16, 17, 18, 22, 23)   # palustrine and estuarine forested, scrub-shrub, emergent, aquatic bed
 
 
 def _cat():
@@ -38,6 +38,14 @@ def _cat():
 
 def _fields():
     return gpd.read_parquet(config.INTERIM / "fields" / "fields.parquet")[["fid", "geometry"]]
+
+
+def clip_to(gdf, b, inset=1.0):
+    """Clip geometries to raster bounds (slightly inset); drops empty results."""
+    from shapely.geometry import box as _box
+    g = gdf.copy()
+    g["geometry"] = g.geometry.intersection(_box(b.left + inset, b.bottom + inset, b.right - inset, b.top - inset))
+    return g[~g.geometry.is_empty & (g.geometry.area > 0)]
 
 
 def _zonal(raster_path_or_ds, fields, ops):
@@ -63,6 +71,7 @@ def soil():
             sub = f.cx[b.left:b.right, b.bottom:b.top]
             if not len(sub):
                 continue
+            sub = clip_to(sub, b)                      # exactextract 0.3 segfaults on polygons leaving the raster
             d = _zonal(src["mukey"], sub, ["majority", "count", "unique", "frac"])
             d["majority_frac"] = [float(np.max(fr)) if len(fr) else np.nan for fr in d["frac"]]
             d = d.drop(columns=["unique", "frac"])
@@ -161,7 +170,7 @@ def wetlands():
     cat = _cat()
     f = _fields()
     items = sorted(cat.search(collections=["noaa-c-cap"], bbox=list(f.to_crs(4326).total_bounds)).items(),
-                   key=lambda i: i.datetime)
+                   key=lambda i: i.properties["start_datetime"])     # items carry start/end, not datetime
     it = items[-1]
     href = it.assets["data"].href
     ring = f.copy()
@@ -174,7 +183,7 @@ def wetlands():
         cols = [c for c in df.columns if c.startswith("frac_")]
         return df[[c for c in cols if int(c.split("_")[1]) in CCAP_WET]].sum(axis=1)
     d = pd.DataFrame({"fid": f.fid.values, "wetland_frac": wet(fr).values, "wetland_frac_500m": wet(rr).values})
-    d["ccap_year"] = it.datetime.year
+    d["ccap_year"] = int(it.properties["start_datetime"][:4])
     (OUT / "wetlands").mkdir(parents=True, exist_ok=True)
     d.to_parquet(OUT / "wetlands" / "wetlands_by_field.parquet", index=False)
     return d

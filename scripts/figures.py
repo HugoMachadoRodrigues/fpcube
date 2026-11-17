@@ -167,9 +167,143 @@ def fig5(rel):
     save(fig, "fig5_benchmark")
 
 
+
+def _cube(rel):
+    import xarray as xr
+    return xr.open_zarr(rel / "cube.zarr")
+
+
+def _hurricanes():
+    p = config.RAW / "labels" / "hurricane_landfalls.parquet"
+    return pd.read_parquet(p) if p.exists() else pd.DataFrame()
+
+
+def fig3(rel):
+    """Two example fields: NDVI (observed vs gap-filled), VV and VH, 5-day rain, county drought class."""
+    if not rel or not (rel / "cube.zarr").exists():
+        print("fig3: no release yet"); return
+    cube = _cube(rel)
+    f = fields_table(rel)
+    ona = gpd.GeoSeries(gpd.points_from_xy([ONA[0]], [ONA[1]]), crs=4326).to_crs(f.crs).iloc[0]
+    nobs = cube.n_optical_obs.sum("time").values
+    cand = f.assign(nobs=nobs, d=f.geometry.distance(ona))
+    a = cand[(cand.tier == "A") & (cand.area_ha > 20)].sort_values("d").iloc[0]          # near Ona
+    b = cand[(cand.tier == "A") & (cand.area_ha > 20) & (cand.lat > 30.3)].sort_values("nobs").iloc[-1]  # panhandle
+    usdm = pd.read_parquet(config.RAW / "labels" / "usdm_county_weekly.parquet")
+    times = pd.DatetimeIndex(cube.time.values)
+    hur = _hurricanes()
+    fig, axs = plt.subplots(4, 2, figsize=(7.2, 6.2), sharex=True, gridspec_kw={"height_ratios": [2, 1.4, 1, 0.5]})
+    for j, row in enumerate((a, b)):
+        i = int(np.nonzero(cube.field.values == row.field_id)[0][0])
+        c = cube.isel(field=i).load()
+        nd, gf, n = c.ndvi.values, c.gap_filled.values.astype(bool), c.n_optical_obs.values
+        ax = axs[0, j]
+        ax.plot(times, np.where(np.isfinite(nd), nd, np.nan), color=C[0], lw=1)
+        ax.plot(times[n > 0], nd[n > 0], "o", ms=2.2, color=C[0], label="observed composite")
+        ax.plot(times[gf], nd[gf], "o", ms=2.2, mfc="white", mec=C[0], mew=0.6, label="gap-filled")
+        ax.set_ylabel("NDVI")
+        ax.set_title(f"{'ab'[j]}  {row.field_id}, {row.county} County, {row.area_ha:.0f} ha")
+        if j == 0:
+            ax.legend(fontsize=6.5, loc="lower left", ncol=2)
+        ax = axs[1, j]
+        ax.plot(times, c.vv_db.values, color=C[2], lw=0.9, label="VV")
+        ax.plot(times, c.vh_db.values, color=C[6], lw=0.9, label="VH")
+        ax.set_ylabel("$\\gamma^0$ (dB)")
+        if j == 0:
+            ax.legend(fontsize=6.5, loc="lower left", ncol=2)
+        ax = axs[2, j]
+        ax.bar(times, c.ppt_sum.values, width=4, color=C[0], linewidth=0)
+        ax.set_ylabel("Rain (mm/5 d)")
+        ax = axs[3, j]
+        u = usdm[usdm.county_fips == row.county_fips].sort_values("valid_start")
+        cls = np.select([u.D2 >= 50, u.D1 >= 50, u.D0 >= 50], [3, 2, 1], 0)
+        cmap = mpl.colors.ListedColormap(["#f0efec", "#fab219", "#ec835a", "#d03b3b"])
+        ax.pcolormesh(np.r_[u.valid_start.values, u.valid_end.values[-1:]], [0, 1], cls[None, :], cmap=cmap,
+                      vmin=-0.5, vmax=3.5)
+        ax.set_yticks([]); ax.grid(False)
+        ax.set_ylabel("USDM", rotation=0, ha="right", va="center")
+        for ax in axs[:, j]:
+            for t in hurricane_days(hur):
+                ax.axvline(t, color=MUTED, lw=0.6, ls="--", zorder=0)
+    handles = [mpl.patches.Patch(color=c_, label=l_) for c_, l_ in
+               zip(["#f0efec", "#fab219", "#ec835a", "#d03b3b"], ["None", "D0", "D1", "D2+"])]
+    fig.legend(handles=handles, loc="lower center", ncol=4, fontsize=7, title="County drought (USDM, >= 50 % area)",
+               title_fontsize=7, bbox_to_anchor=(0.5, -0.04))
+    fig.tight_layout()
+    save(fig, "fig3_examples")
+
+
+def hurricane_days(hur):
+    """Florida landfalls at hurricane strength (HU), one date per storm."""
+    if not len(hur):
+        return []
+    h = hur[(hur.status == "HU") & hur.lat.between(24.4, 31.1) & hur.lon.between(-87.7, -79.9)]
+    return list(pd.to_datetime(h.groupby("storm_id").time.min()))
+
+
+def _traj(a, k, rows, pre=12, post=12):
+    seg = a[rows][:, k - pre:k + post + 1]
+    return np.arange(-pre, post + 1) * config.COMPOSITE_DAYS, np.nanmedian(seg, 0), np.nanpercentile(seg, 25, 0), \
+        np.nanpercentile(seg, 75, 0)
+
+
+def fig4(rel):
+    """Field response to Hurricane Ian (2022) and the January 2018 freeze."""
+    if not rel or not (rel / "cube.zarr").exists():
+        print("fig4: no release yet"); return
+    cube = _cube(rel)
+    f = fields_table(rel)
+    co = counties()
+    times = pd.DatetimeIndex(cube.time.values)
+    ppt = cube.ppt_sum.values
+    fig, axs = plt.subplots(2, 3, figsize=(7.2, 5.0), gridspec_kw={"width_ratios": [1.15, 1, 1]})
+    events = [("Hurricane Ian, 28 Sep 2022", pd.Timestamp("2022-09-28"), "vv_db", "ndvi"),
+              ("Freeze, 17 Jan 2018", pd.Timestamp("2018-01-17"), "ndvi", "vv_db")]
+    for r, (title, day, mapvar, other) in enumerate(events):
+        k = int(np.searchsorted(times, day))
+        if r == 0:
+            rain = np.nansum(ppt[:, k - 1:k + 1], axis=1)
+            pos, neg = rain >= 200, rain < 50
+            lab_pos, lab_neg = "$\\geq$ 200 mm in 10 d", "< 50 mm"
+        else:
+            tmin = cube.tmin_mean.values[:, k] if "tmin_mean" in cube else np.full(len(f), np.nan)
+            pos, neg = tmin <= 2, tmin >= 8
+            lab_pos, lab_neg = "5-day mean $T_{min}$ $\\leq$ 2 °C", "$\\geq$ 8 °C"
+        a = cube[mapvar].values
+        delta = np.nanmedian(a[:, k + 1:k + 4], 1) - np.nanmedian(a[:, k - 6:k], 1)
+        ax = axs[r, 0]
+        co.boundary.plot(ax=ax, color=AXIS, linewidth=0.25)
+        lim = np.nanpercentile(np.abs(delta), 95)
+        pts = f.geometry.representative_point()
+        ok = np.isfinite(delta)
+        ax.scatter(pts.x[ok], pts.y[ok], c=delta[ok], s=0.4, cmap=DIV if mapvar == "ndvi" else DIV.reversed(),
+                   vmin=-lim, vmax=lim, rasterized=True, linewidths=0)
+        sm = mpl.cm.ScalarMappable(cmap=DIV if mapvar == "ndvi" else DIV.reversed(),
+                                   norm=mpl.colors.Normalize(-lim, lim))
+        fig.colorbar(sm, ax=ax, shrink=0.6, label=f"Δ{'NDVI' if mapvar == 'ndvi' else 'VV (dB)'}")
+        ax.set_axis_off()
+        ax.set_title(f"{'ad'[r]}  {title}", fontsize=8)
+        for c_, (var, lab) in enumerate(((mapvar, None), (other, None))):
+            ax = axs[r, 1 + c_]
+            arr = cube[var].values
+            for rows, col, l_ in ((pos, C[1], lab_pos), (neg, C[0], lab_neg)):
+                if rows.sum() < 10:
+                    continue
+                x, m, lo, hi = _traj(arr, k, rows)
+                ax.fill_between(x, lo, hi, color=col, alpha=0.18, linewidth=0)
+                ax.plot(x, m, color=col, label=f"{l_} (n = {rows.sum():,})")
+            ax.axvline(0, color=MUTED, lw=0.7, ls="--")
+            ax.set_xlabel("Days from event")
+            ax.set_ylabel("NDVI" if var == "ndvi" else "VV (dB)")
+            ax.set_title(f"{'bcef'[2 * r + c_]}", fontsize=8)
+            if c_ == 0:
+                ax.legend(fontsize=6.3, loc="best")
+    fig.tight_layout()
+    save(fig, "fig4_events")
+
 if __name__ == "__main__":
     ap = argparse.ArgumentParser()
-    ap.add_argument("figs", nargs="*", default=["fig1", "fig2", "fig5"])
+    ap.add_argument("figs", nargs="*", default=["fig1", "fig2", "fig3", "fig4", "fig5"])
     ap.add_argument("--release", default="v1.0")
     a = ap.parse_args()
     rel = config.RELEASE / a.release

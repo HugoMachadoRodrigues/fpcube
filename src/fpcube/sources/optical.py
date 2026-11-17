@@ -144,7 +144,7 @@ def search_items(bbox, start=config.START, end=config.END):
 def _open(href, host):
     if host == "pc":
         import planetary_computer as pc
-        href = pc.sign(href)
+        href = pc.sign(href.split("?")[0])   # cached tokens expire; sign fresh
     return rasterio.open(href)
 
 

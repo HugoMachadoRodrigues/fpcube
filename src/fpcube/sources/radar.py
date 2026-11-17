@@ -50,7 +50,53 @@ def search(bbox):
 
 def _open(href):
     import planetary_computer as pc
-    return rasterio.open(pc.sign(href), overview_level=0)
+    return rasterio.open(pc.sign(href.split("?")[0]), overview_level=0)   # cached tokens expire
+
+
+MASTER_EPSG = 32617          # all Sentinel-1 RTC scenes over Florida are delivered in UTM 17N
+MASTER_RES = 20.0
+_MASTER = {}
+
+
+def master_labels():
+    """Field ids rasterized once on a 20 m UTM 17N grid snapped to multiples of 20 m (fields buffered -20 m).
+    Scene pixels are labelled by nearest master pixel (<= 10 m away), so every labelled 20 m scene pixel lies
+    inside its field. Cached as a GeoTIFF and in memory."""
+    if "a" in _MASTER:
+        return _MASTER["a"], _MASTER["x0"], _MASTER["y0"]
+    p = OUT / f"fields_{MASTER_EPSG}_20m.tif"
+    if not p.exists():
+        f = gpd.read_parquet(config.INTERIM / "fields" / "fields.parquet")[["fid", "geometry"]].to_crs(MASTER_EPSG)
+        inner = f.geometry.buffer(-20)
+        keep = ~inner.is_empty
+        x0, y0, x1, y1 = inner[keep].total_bounds
+        x0, y0 = np.floor(x0 / MASTER_RES) * MASTER_RES - 100, np.floor(y0 / MASTER_RES) * MASTER_RES - 100
+        x1, y1 = np.ceil(x1 / MASTER_RES) * MASTER_RES + 100, np.ceil(y1 / MASTER_RES) * MASTER_RES + 100
+        tr = rasterio.transform.from_origin(x0, y1, MASTER_RES, MASTER_RES)
+        shp = (int((y1 - y0) / MASTER_RES), int((x1 - x0) / MASTER_RES))
+        a = features.rasterize(zip(inner[keep], f.fid[keep]), out_shape=shp, transform=tr, fill=0, dtype="int32")
+        with rasterio.open(p, "w", driver="GTiff", height=shp[0], width=shp[1], count=1, dtype="int32",
+                           crs=f"EPSG:{MASTER_EPSG}", transform=tr, compress="deflate", tiled=True) as d:
+            d.write(a, 1)
+    with rasterio.open(p) as s:
+        _MASTER.update(a=s.read(1), x0=s.transform.c, y0=s.transform.f)
+    return _MASTER["a"], _MASTER["x0"], _MASTER["y0"]
+
+
+def scene_labels(tr, shp):
+    """Field id for each pixel of a scene grid (same CRS as the master) by nearest master pixel."""
+    a, x0, y0 = master_labels()
+    xs = tr.c + (np.arange(shp[1]) + 0.5) * tr.a
+    ys = tr.f + (np.arange(shp[0]) + 0.5) * tr.e
+    mc = np.floor((xs - x0) / MASTER_RES).astype(np.int64)
+    mr = np.floor((y0 - ys) / MASTER_RES).astype(np.int64)
+    okc = (mc >= 0) & (mc < a.shape[1])
+    okr = (mr >= 0) & (mr < a.shape[0])
+    lab = np.zeros(shp, np.int32)
+    if okc.any() and okr.any():
+        rr, cc = np.nonzero(okr)[0], np.nonzero(okc)[0]
+        lab[np.ix_(rr, cc)] = a[np.ix_(mr[rr], mc[cc])]
+    return lab
 
 
 BLOCK_THREADS = int(os.environ.get("FPCUBE_S1_BLOCK_THREADS", "8"))
@@ -66,13 +112,18 @@ def process(it, fields):
         return None
     with rasterio.Env(**GDAL_ENV), _open(it.vv) as s0:
         crs, tr, shp, nod, (bh, bw) = s0.crs, s0.transform, s0.shape, s0.nodata, s0.block_shapes[0]
-    g = f.to_crs(crs)
-    inner = g.geometry.buffer(-20)
-    inner = inner[~inner.is_empty]
-    if not len(inner):
+    if crs.to_epsg() == MASTER_EPSG:
+        lab = scene_labels(tr, shp)
+    else:                                    # fallback: rasterize on the scene grid
+        g = f.to_crs(crs)
+        inner = g.geometry.buffer(-20)
+        inner = inner[~inner.is_empty]
+        if not len(inner):
+            return None
+        lab = features.rasterize(zip(inner, g.loc[inner.index, "fid"]), out_shape=shp, transform=tr, fill=0,
+                                 dtype="int32")
+    if not lab.any():
         return None
-    lab = features.rasterize(zip(inner, g.loc[inner.index, "fid"]), out_shape=shp, transform=tr, fill=0,
-                             dtype="int32")
     nmax = int(lab.max()) + 1
     blocks = [(r0, c0) for r0 in range(0, shp[0], bh) for c0 in range(0, shp[1], bw)
               if lab[r0:r0 + bh, c0:c0 + bw].any()]
@@ -141,6 +192,7 @@ def main():
     done = set(json.loads(done_p.read_text())) if done_p.exists() else set()
     todo = items[~items.id.isin(done)]
     print(f"{len(items)} S1 items, {len(todo)} to do", flush=True)
+    master_labels()
     t0 = time.time()
 
     def work(it):

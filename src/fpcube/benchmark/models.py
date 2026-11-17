@@ -3,6 +3,7 @@
 All deep models are small on purpose (they are reference points, not the state of the art) and are trained with
 fixed seeds, early stopping on the validation split and the same budget for every task.
 """
+import lightgbm  # noqa: F401  -- must load before torch: two OpenMP runtimes segfault on macOS otherwise
 import numpy as np
 import pandas as pd
 import torch

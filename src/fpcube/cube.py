@@ -34,6 +34,7 @@ OPT_VARS = ["blue", "green", "red", "nir", "swir1", "swir2", "ndvi", "evi", "ndm
             "water_frac"]
 MAX_GAP_DAYS = 30
 MAX_SHIFT_PX = 1.0
+CHUNK = 8000                          # fields per composite chunk
 
 
 def calendar():
@@ -47,12 +48,36 @@ def period_index(dates):
     return ((pd.to_datetime(dates) - a).dt.days // config.COMPOSITE_DAYS).astype(int)
 
 
-def load_optical():
-    files = sorted((config.INTERIM / "optical").glob("*/*.parquet"))
-    files = [f for f in files if f.name != "items.parquet"]
-    d = pd.concat((pd.read_parquet(f) for f in files), ignore_index=True)
-    d["date"] = pd.to_datetime(d.date)
+def _files(kind):
+    if kind == "optical":
+        fs = [f for f in (config.INTERIM / "optical").glob("T*/*.parquet")]
+    else:
+        fs = list((config.INTERIM / "radar" / "s1").glob("2*/*.parquet"))
+    return sorted(fs)
+
+
+def _load(kind, lo=None, hi=None, start=None, end=None):
+    """Observations from the interim tables, optionally only fids in [lo, hi) and dates in [start, end)."""
+    import pyarrow.dataset as ds
+    files = _files(kind)
+    if not files:
+        return pd.DataFrame()
+    dset = ds.dataset([str(f) for f in files], format="parquet")
+    flt = None
+    for cond in ((ds.field("fid") >= lo) if lo is not None else None,
+                 (ds.field("fid") < hi) if hi is not None else None,
+                 (ds.field("date") >= pd.Timestamp(start)) if start is not None else None,
+                 (ds.field("date") < pd.Timestamp(end)) if end is not None else None):
+        if cond is not None:
+            flt = cond if flt is None else flt & cond
+    d = dset.to_table(filter=flt).to_pandas()
+    if len(d):
+        d["date"] = pd.to_datetime(d.date)
     return d
+
+
+def load_optical(lo=None, hi=None, start=None, end=None):
+    return _load("optical", lo, hi, start, end)
 
 
 def screen_optical(d):
@@ -123,11 +148,8 @@ def _run_lengths(mask):
     return out
 
 
-def load_radar():
-    files = sorted((config.INTERIM / "radar" / "s1").glob("*/*.parquet"))
-    d = pd.concat((pd.read_parquet(f) for f in files), ignore_index=True)
-    d["date"] = pd.to_datetime(d.date)
-    return d
+def load_radar(lo=None, hi=None, start=None, end=None):
+    return _load("radar", lo, hi, start, end)
 
 
 def radar_composites(obs, fids, times):
@@ -203,10 +225,28 @@ def build(version="v1.0"):
     fids = fields.fid.to_numpy()
     times = calendar()
 
-    obs = screen_optical(load_optical())
-    opt, nobs, filled = optical_composites(obs, fids, times)
-    rad_obs = load_radar()
-    rad, nrad = radar_composites(rad_obs, fids, times)
+    # composites field chunk by field chunk, so the observation tables never sit in memory whole
+    opt = {v: np.full((len(fids), len(times)), np.nan, np.float32) for v in OPT_VARS}
+    nobs = np.zeros((len(fids), len(times)), np.uint8)
+    filled = np.zeros((len(fids), len(times)), bool)
+    rad = {v: np.full((len(fids), len(times)), np.nan, np.float32) for v in ("vv_db", "vh_db", "vh_vv_db")}
+    nrad = np.zeros((len(fids), len(times)), np.uint8)
+    for k0 in range(0, len(fids), CHUNK):
+        sl = slice(k0, k0 + CHUNK)
+        lo, hi = int(fids[sl][0]), int(fids[sl][-1]) + 1
+        o = load_optical(lo, hi)
+        if len(o):
+            a, n, f_ = optical_composites(screen_optical(o), fids[sl], times)
+            for v in OPT_VARS:
+                opt[v][sl] = a[v]
+            nobs[sl], filled[sl] = n, f_
+        r = load_radar(lo, hi)
+        if len(r):
+            a, n = radar_composites(r, fids[sl], times)
+            for v in rad:
+                rad[v][sl] = a[v]
+            nrad[sl] = n
+        print(f"cube fields {k0 + CHUNK}/{len(fids)}", flush=True)
     wx = weather_composites(fields, times)
 
     ds = xr.Dataset(coords={"field": fields.field_id.to_numpy(), "time": times})
@@ -226,12 +266,15 @@ def build(version="v1.0"):
     ds.chunk({"field": 2048, "time": 365}).to_zarr(rel / "cube.zarr", mode="w", consolidated=True)
 
     fields.to_parquet(rel / "fields.parquet")
-    (rel / "optical_observations").mkdir()
-    for y, g in obs.groupby(obs.date.dt.year):
-        g.drop(columns=["item"]).to_parquet(rel / "optical_observations" / f"{y}.parquet", index=False)
-    (rel / "radar_observations").mkdir()
-    for y, g in rad_obs.groupby(rad_obs.date.dt.year):
-        g.to_parquet(rel / "radar_observations" / f"{y}.parquet", index=False)
+    for kind, sub in (("optical", "optical_observations"), ("radar", "radar_observations")):
+        (rel / sub).mkdir()
+        for y in config.YEARS:
+            d = _load(kind, start=f"{y}-01-01", end=f"{y + 1}-01-01")
+            if not len(d):
+                continue
+            if kind == "optical":
+                d = screen_optical(d).drop(columns=["item"], errors="ignore")
+            d.to_parquet(rel / sub / f"{y}.parquet", index=False)
     (rel / "labels").mkdir()
     for p in (config.RAW / "labels").glob("*.parquet"):
         shutil.copy(p, rel / "labels" / p.name)

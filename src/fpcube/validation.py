@@ -38,6 +38,8 @@ def worldcover(fields):
             sub = f4.cx[b.left:b.right, b.bottom:b.top]
             if not len(sub):
                 continue
+            from fpcube.sources.static import clip_to
+            sub = clip_to(sub, b, inset=1e-6)          # exactextract 0.3 segfaults on polygons leaving the raster
             d = exact_extract(s, sub, ["unique", "frac", "count"], include_cols=["fid"], output="pandas")
         res.append(d)
     d = pd.concat(res, ignore_index=True)
@@ -57,7 +59,7 @@ def delineation_text(wc, fields):
         w = g.area_ha / g.area_ha.sum()
         out[tier] = {c: float((g[c] * w).sum()) for c in ("grassland", "tree", "cropland", "built",
                                                           "herbaceous_wetland", "water") if c in g}
-    txt = ("ESA WorldCover 2021 \\citep{zanaga2022}, which is derived from Sentinel-1 and Sentinel-2 independently of "
+    txt = ("ESA WorldCover 2021 \\citep{{zanaga2022}}, which is derived from Sentinel-1 and Sentinel-2 independently of "
            "the CDL, maps {gA:.0f}\\,\\% of the area of tier~A fields and {gB:.0f}\\,\\% of tier~B fields as grassland "
            "and a further {cA:.0f}\\,\\% and {cB:.0f}\\,\\% as cropland, which in Florida includes hay and improved "
            "pasture. Trees cover {tA:.0f}\\,\\% (A) and {tB:.0f}\\,\\% (B) and herbaceous wetland {wA:.0f}\\,\\% and "
