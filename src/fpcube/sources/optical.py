@@ -1,6 +1,6 @@
 """Per-field optical series from Harmonized Landsat Sentinel-2 (HLS v2.0, S30 and L30), 2016-2026.
 
-Same product from two hosts: NASA LP DAAC (CMR granule search, Earthdata login via ~/.netrc) before 2020 and
+Same product from two hosts: NASA LP DAAC (CMR granule search, Earthdata login via ~/.netrc) for the whole period and
 Microsoft Planetary Computer (hls2-s30 / hls2-l30, identical HLS v2.0 files) from 2020.
 
 For each MGRS tile that touches a field:
@@ -123,8 +123,10 @@ def search_items(bbox, start=config.START, end=config.END):
     cache = OUT / "catalog_months"
     cache.mkdir(parents=True, exist_ok=True)
     frames = []
+    # LP DAAC (the HLS archive of record) for the whole period, Planetary Computer from 2020; the PC mirror misses
+    # ~20 % of granules (and most of March 2026), so the catalog is their union, read from PC when PC has it
     for sensor in ("S30", "L30"):
-        for host, a0, b0 in (("lpdaac", start, "2019-12-31"), ("pc", PC_START, end)):
+        for host, a0, b0 in (("lpdaac", start, end), ("pc", PC_START, end)):
             for m0 in pd.date_range(a0, b0, freq="MS"):
                 p = cache / f"{sensor}_{host}_{m0:%Y-%m}.parquet"
                 if not p.exists():
@@ -136,7 +138,9 @@ def search_items(bbox, start=config.START, end=config.END):
                     df.to_parquet(p, index=False)
                     print(f"catalog {sensor} {host} {m0:%Y-%m}: {len(df)} items", flush=True)
                 frames.append(pd.read_parquet(p))
-    df = pd.concat(frames, ignore_index=True).drop_duplicates("id")
+    df = pd.concat(frames, ignore_index=True)
+    df["_pref"] = (df.host != "pc").astype(int)                       # prefer the PC copy (faster, same file)
+    df = df.sort_values(["id", "_pref"]).drop_duplicates("id").drop(columns="_pref")
     df["hrefs"] = df.hrefs.map(json.loads)
     return df.sort_values(["tile", "datetime"]).reset_index(drop=True)
 
@@ -333,14 +337,20 @@ def main(tiles=None):
         tmp["hrefs"] = tmp.hrefs.map(json.dumps)
         tmp.to_parquet(cat_path, index=False)
     print(f"{len(items)} items over {items.tile.nunique()} tiles", flush=True)
+    n_with_fields = 0
     for tile, g in items.groupby("tile"):
         if tiles and tile not in tiles:
             continue
         T = Tile(tile, g, fields)
         if not len(T.fids):
+            print(f"tile {tile}: no fields", flush=True)
             continue
-        print(f"tile {tile}: {len(T.fids)} fields, {len(g)} items", flush=True)
+        n_with_fields += 1
+        print(f"tile {tile}: {len(T.fids)} fields, {len(g)} items, reference {T.ref_item.id} "
+              f"({100 * T.ref_clear_frac:.0f}% of field pixels clear)", flush=True)
         T.run()
+    if n_with_fields == 0:
+        raise RuntimeError("no MGRS tile contains any field: check field/tile geometry")
 
 
 if __name__ == "__main__":
