@@ -10,6 +10,10 @@ import torch
 from torch import nn
 
 SEED = 20261116
+# LightGBM (Homebrew libomp) and torch (bundled libomp) load two OpenMP runtimes on macOS; keeping torch's CPU side
+# single-threaded avoids the crash. Deep models run on MPS/CUDA when available; the MIL model is small.
+torch.set_num_threads(1)
+torch.set_num_interop_threads(1)
 DEVICE = "mps" if torch.backends.mps.is_available() else ("cuda" if torch.cuda.is_available() else "cpu")
 
 

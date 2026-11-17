@@ -146,9 +146,9 @@ def task2_events(fields, tracks, landfalls, usdm):
     ev = []
     # hurricanes: storms reaching >= 64 kt with track points within 150 km of any field
     for sid, g in tracks.groupby("storm_id"):
-        if g.vmax_kt.max() < 64:
+        g = g[g.vmax_kt >= 64].sort_values("time")          # hurricane-strength part of the track only
+        if not len(g):
             continue
-        g = g.sort_values("time")
         d = np.min(np.hypot((lonlat[:, None, 0] - g.lon.to_numpy()[None]) * 98.0,
                             (lonlat[:, None, 1] - g.lat.to_numpy()[None]) * 111.0), axis=1)
         if d.min() > 150:
@@ -188,21 +188,25 @@ def task2_events(fields, tracks, landfalls, usdm):
             ev.append({"event_id": f"freeze_{day:%Y%m%d}", "kind": "freeze", "date": day, "name": "",
                        "pos": pos, "neg": neg})
             taken.append(day)
-    # drought onset: first week a county reaches D2+ after >= 8 weeks below D1
+    # drought onset: first week a county reaches D2+ (>= 50 % of area) after >= 8 weeks without; onsets of the same
+    # week form one event (positives: fields in those counties; negatives: fields in counties with < 10 % in D0+)
     fips = fields.county_fips.to_numpy() if "county_fips" in fields else None
     if fips is not None:
-        u = usdm.sort_values(["county_fips", "valid_start"])
+        u = usdm.sort_values(["county_fips", "valid_start"]).copy()
         u["d2"] = u.D2 >= 50
+        onsets = []
         for cf, g in u.groupby("county_fips"):
             prev = g.d2.shift(1, fill_value=False).rolling(8, min_periods=8).max().fillna(1).astype(bool)
-            for day in g.loc[g.d2 & ~prev, "valid_start"]:
-                same = u[(u.valid_start == day)]
-                calm = set(same.loc[same.D0 < 10, "county_fips"])
-                pos = np.nonzero(fips == cf)[0]
-                neg = np.nonzero(np.isin(fips, list(calm)))[0]
-                if len(pos) >= 20 and len(neg) >= 20:
-                    ev.append({"event_id": f"drought_{cf}_{day:%Y%m%d}", "kind": "drought", "date": day,
-                               "name": cf, "pos": pos, "neg": neg})
+            onsets += [(cf, d) for d in g.loc[g.d2 & ~prev, "valid_start"]]
+        on = pd.DataFrame(onsets, columns=["county_fips", "day"])
+        for day, g in on.groupby("day"):
+            same = u[u.valid_start == day]
+            calm = set(same.loc[same.D0 < 10, "county_fips"])
+            pos = np.nonzero(np.isin(fips, g.county_fips.to_numpy()))[0]
+            neg = np.nonzero(np.isin(fips, list(calm)))[0]
+            if len(pos) >= 20 and len(neg) >= 20:
+                ev.append({"event_id": f"drought_{day:%Y%m%d}", "kind": "drought", "date": day,
+                           "name": ",".join(sorted(g.county_fips)), "pos": pos, "neg": neg})
     return ev
 
 
