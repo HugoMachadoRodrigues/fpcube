@@ -140,7 +140,7 @@ def terrain_rasters():
     out = OUT / "terrain"
     dem = dem_mosaic()
     p = {k: out / f"{k}.tif" for k in ("breached", "d8", "acc", "streams", "hand", "slope", "sca", "twi")}
-    steps = [("breached", "BreachDepressionsLeastCost", dict(dem=dem.name, output="breached.tif", dist=100, fill=True)),
+    steps = [("breached", "BreachDepressionsLeastCost", dict(dem=dem.name, output="breached.tif", dist=10, fill=True)),
              ("d8", "D8Pointer", dict(dem="breached.tif", output="d8.tif")),
              ("acc", "D8FlowAccumulation", dict(input="breached.tif", output="acc.tif", out_type="cells")),
              ("streams", "ExtractStreams", dict(flow_accum="acc.tif", output="streams.tif", threshold=1111)),
