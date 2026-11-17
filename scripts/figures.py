@@ -58,16 +58,18 @@ def fig1(rel):
         g.plot(ax=ax, color=col, linewidth=0, label=f"{lab} ({len(g):,} fields)")
     ona = gpd.GeoSeries(gpd.points_from_xy([ONA[0]], [ONA[1]]), crs=4326).to_crs(f.crs)
     ax.plot(ona.x, ona.y, marker="*", ms=9, color=INK, mec="white", mew=0.8, ls="none")
-    ax.annotate("Ona (RCREC)", (ona.x.iloc[0], ona.y.iloc[0]), xytext=(8, -2), textcoords="offset points",
-                color=INK, fontsize=7.5)
+    import matplotlib.patheffects as pe
+    ax.annotate("Ona (RCREC)", (ona.x.iloc[0], ona.y.iloc[0]), xytext=(-90, -40), textcoords="offset points",
+                color=INK, fontsize=7.5, arrowprops=dict(arrowstyle="-", color=INK, lw=0.6),
+                path_effects=[pe.withStroke(linewidth=2.5, foreground="white")])
     ax.set_axis_off()
     ax.legend(loc="lower left", fontsize=7.5, handlelength=1, handleheight=1)
     ax.set_title("a  Persistent pasture fields, Florida", x=0.02, y=0.97)
     # county density (field area share of county)
     ax2 = fig.add_axes([0.66, 0.52, 0.34, 0.46])
     a = f.groupby("county_fips").area_ha.sum()
-    cc = co.merge(a.rename("area"), left_on="GEOID", right_index=True, how="left")
-    cc["share"] = 100 * cc.area.fillna(0) / (cc.geometry.area / 1e4)
+    cc = co.merge(a.rename("field_ha"), left_on="GEOID", right_index=True, how="left")
+    cc["share"] = 100 * cc["field_ha"].fillna(0) / (cc.geometry.area / 1e4)
     cc.plot(ax=ax2, column="share", cmap=SEQ, linewidth=0.2, edgecolor="white", legend=True,
             legend_kwds={"shrink": 0.6, "label": "% of county area in fields"})
     ax2.set_axis_off()
@@ -81,11 +83,12 @@ def fig1(rel):
         sub[sub.tier == tier].plot(ax=ax3, color=col, edgecolor="white", linewidth=0.4)
     ax3.plot(x, y, marker="*", ms=10, color=INK, mec="white", mew=0.8)
     ax3.set_xlim(box[0], box[2]); ax3.set_ylim(box[1], box[3])
-    ax3.set_xticks([]); ax3.set_yticks([]); ax3.grid(False)
+    ax3.set_xticks([]); ax3.set_yticks([]); ax3.grid(False); ax3.set_xlabel(""); ax3.set_ylabel("")
     for s in ax3.spines.values():
         s.set_visible(True); s.set_color(AXIS)
-    ax3.plot([box[0] + 1000, box[0] + 6000], [box[1] + 1000] * 2, color=INK, lw=2)
-    ax3.text(box[0] + 3500, box[1] + 1500, "5 km", ha="center", fontsize=7, color=INK)
+    ax3.add_patch(mpl.patches.Rectangle((box[0] + 400, box[1] + 400), 6200, 2000, color="white", zorder=4))
+    ax3.plot([box[0] + 1000, box[0] + 6000], [box[1] + 900] * 2, color=INK, lw=2, zorder=5)
+    ax3.text(box[0] + 3500, box[1] + 1300, "5 km", ha="center", fontsize=7, color=INK, zorder=5)
     ax3.set_title("c  Fields around Ona (20 × 20 km)", x=0.02)
     save(fig, "fig1_map")
 

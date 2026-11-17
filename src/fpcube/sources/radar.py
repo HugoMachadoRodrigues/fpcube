@@ -24,8 +24,9 @@ from fpcube import config
 
 PC_STAC = "https://planetarycomputer.microsoft.com/api/stac/v1"
 OUT = config.INTERIM / "radar" / "s1"
-GDAL_ENV = dict(GDAL_DISABLE_READDIR_ON_OPEN="EMPTY_DIR", CPL_VSIL_CURL_ALLOWED_EXTENSIONS=".tif",
-                GDAL_HTTP_MAX_RETRY="6", GDAL_HTTP_RETRY_DELAY="4", GDAL_HTTP_MULTIPLEX="YES")
+GDAL_ENV = dict(GDAL_DISABLE_READDIR_ON_OPEN="EMPTY_DIR", CPL_VSIL_CURL_ALLOWED_EXTENSIONS=".tif,.tiff",
+                GDAL_HTTP_MAX_RETRY="6", GDAL_HTTP_RETRY_DELAY="4", GDAL_HTTP_MULTIPLEX="YES", GDAL_HTTP_MERGE_CONSECUTIVE_RANGES="YES",
+                GDAL_CACHEMAX=512)
 WORKERS = int(os.environ.get("FPCUBE_S1_WORKERS", "6"))
 
 
@@ -47,46 +48,78 @@ def search(bbox):
     return pd.DataFrame(rows).drop_duplicates("id").sort_values("datetime").reset_index(drop=True)
 
 
-def _read_ovr(href):
+def _open(href):
     import planetary_computer as pc
-    for i in range(4):
-        try:
-            with rasterio.Env(**GDAL_ENV), rasterio.open(pc.sign(href), overview_level=0) as s:
-                return s.read(1, masked=False).astype(np.float32), s.transform, s.crs, s.nodata
-        except Exception:
-            if i == 3:
-                raise
-            time.sleep(10 * (i + 1))
+    return rasterio.open(pc.sign(href), overview_level=0)
+
+
+BLOCK_THREADS = int(os.environ.get("FPCUBE_S1_BLOCK_THREADS", "8"))
 
 
 def process(it, fields):
+    """Read only the 20 m blocks that contain field pixels (in parallel, one dataset handle per thread) and
+    accumulate per-field sums of linear gamma0."""
+    import threading
     fp = shape(json.loads(it.footprint))
     f = fields[fields.intersects(gpd.GeoSeries([fp], crs=4326).to_crs(fields.crs).iloc[0])]
     if not len(f) or it.vv is None:
         return None
-    vv, tr, crs, nod = _read_ovr(it.vv)
-    vh = _read_ovr(it.vh)[0] if it.vh else np.full_like(vv, np.nan)
+    with rasterio.Env(**GDAL_ENV), _open(it.vv) as s0:
+        crs, tr, shp, nod, (bh, bw) = s0.crs, s0.transform, s0.shape, s0.nodata, s0.block_shapes[0]
     g = f.to_crs(crs)
     inner = g.geometry.buffer(-20)
     inner = inner[~inner.is_empty]
     if not len(inner):
         return None
-    lab = features.rasterize(zip(inner, g.loc[inner.index, "fid"]), out_shape=vv.shape, transform=tr, fill=0,
+    lab = features.rasterize(zip(inner, g.loc[inner.index, "fid"]), out_shape=shp, transform=tr, fill=0,
                              dtype="int32")
-    ok = (lab > 0) & np.isfinite(vv) & (vv > 0)
-    if nod is not None:
-        ok &= vv != nod
-    if not ok.any():
+    nmax = int(lab.max()) + 1
+    blocks = [(r0, c0) for r0 in range(0, shp[0], bh) for c0 in range(0, shp[1], bw)
+              if lab[r0:r0 + bh, c0:c0 + bw].any()]
+    local = threading.local()
+
+    def handles():
+        if not hasattr(local, "h"):
+            local.env = rasterio.Env(**GDAL_ENV)
+            local.env.__enter__()
+            local.h = (_open(it.vv), _open(it.vh) if it.vh else None)
+        return local.h
+
+    def one(rc):
+        r0, c0 = rc
+        lb = lab[r0:r0 + bh, c0:c0 + bw]
+        w = rasterio.windows.Window(c0, r0, lb.shape[1], lb.shape[0])
+        for attempt in range(4):
+            try:
+                svv, svh = handles()
+                vv = svv.read(1, window=w).astype(np.float32)
+                vh = svh.read(1, window=w).astype(np.float32) if svh is not None else np.full_like(vv, np.nan)
+                break
+            except Exception:
+                if attempt == 3:
+                    raise
+                local.__dict__.pop("h", None)
+                time.sleep(5 * (attempt + 1))
+        ok = (lb > 0) & np.isfinite(vv) & (vv > 0)
+        if nod is not None:
+            ok &= vv != nod
+        idx = lb[ok]
+        vh = vh[ok]
+        okh = np.isfinite(vh) & (vh > 0)
+        return (np.bincount(idx, minlength=nmax), np.bincount(idx, weights=vv[ok], minlength=nmax),
+                np.bincount(idx[okh], minlength=nmax), np.bincount(idx[okh], weights=vh[okh], minlength=nmax))
+
+    s_n = np.zeros(nmax); s_vv = np.zeros(nmax); s_nh = np.zeros(nmax); s_vh = np.zeros(nmax)
+    with ThreadPoolExecutor(BLOCK_THREADS) as ex:
+        for a, b, c, d in ex.map(one, blocks):
+            s_n += a; s_vv += b; s_nh += c; s_vh += d
+    ids = np.nonzero(s_n)[0]
+    if not len(ids):
         return None
-    ids, inv = np.unique(lab[ok], return_inverse=True)
-    n = np.bincount(inv)
-    mvv = np.bincount(inv, weights=vv[ok]) / n
-    vh_ok = np.isfinite(vh[ok]) & (vh[ok] > 0)
-    nvh = np.bincount(inv[vh_ok], minlength=len(ids))
-    mvh = np.bincount(inv[vh_ok], weights=vh[ok][vh_ok], minlength=len(ids)) / np.maximum(nvh, 1)
-    mvh[nvh == 0] = np.nan
-    df = pd.DataFrame({"fid": ids, "n_px": n, "vv_lin": mvv, "vh_lin": mvh})
     with np.errstate(divide="ignore", invalid="ignore"):
+        mvh = np.where(s_nh[ids] > 0, s_vh[ids] / s_nh[ids], np.nan)
+        df = pd.DataFrame({"fid": ids, "n_px": s_n[ids].astype(np.int32), "vv_lin": s_vv[ids] / s_n[ids],
+                           "vh_lin": mvh})
         df["vv_db"] = 10 * np.log10(df.vv_lin)
         df["vh_db"] = 10 * np.log10(df.vh_lin)
         df["vh_vv_db"] = df.vh_db - df.vv_db

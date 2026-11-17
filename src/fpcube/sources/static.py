@@ -61,13 +61,15 @@ def soil():
             sub = f.cx[b.left:b.right, b.bottom:b.top]
             if not len(sub):
                 continue
-            d = _zonal(src["mukey"], sub, ["majority", "majority_frac"])
+            d = _zonal(src["mukey"], sub, ["majority", "count", "unique", "frac"])
+            d["majority_frac"] = [float(np.max(fr)) if len(fr) else np.nan for fr in d["frac"]]
+            d = d.drop(columns=["unique", "frac"])
             for a, col in (("aws0_100", "aws0_100_mm"), ("soc0_100", "soc0_100_gm2")):
                 d[col] = _zonal(src[a], sub, ["mean"])["mean"].values
             d["tile"] = it.id
             res.append(d)
         print("soil tile", k + 1, len(items), flush=True)
-    d = pd.concat(res, ignore_index=True).sort_values("majority_frac").drop_duplicates("fid", keep="last")
+    d = pd.concat(res, ignore_index=True).sort_values("count").drop_duplicates("fid", keep="last").drop(columns="count")
     d = d.rename(columns={"majority": "mukey", "majority_frac": "mukey_frac"})
     t = next(cat.search(collections=["gnatsgo-tables"], ids=["muaggatt"]).items())
     mua = pd.read_parquet(t.assets["data"].href, storage_options=t.assets["data"].extra_fields.get(
