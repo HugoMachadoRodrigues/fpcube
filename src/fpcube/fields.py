@@ -59,6 +59,23 @@ def _read(year):
         return s.read(1)
 
 
+
+def fill_county(gdf, fips):
+    """Parcels without a county number: take the county containing the field's representative point
+    (US Census 2023 cartographic boundaries, raw/boundaries/fl_counties.parquet)."""
+    miss = gdf.county_fips.isna()
+    p = config.RAW / "boundaries" / "fl_counties.parquet"
+    if not miss.any() or not p.exists():
+        return gdf
+    co = gpd.read_parquet(p).to_crs(gdf.crs)
+    pts = gpd.GeoDataFrame(geometry=gdf.loc[miss].geometry.representative_point(), crs=gdf.crs)
+    j = gpd.sjoin(pts, co[["GEOID", "geometry"]], how="left", predicate="within")
+    j = j[~j.index.duplicated()]
+    name = {v: k for k, v in fips.items()}
+    gdf.loc[miss, "county_fips"] = j.GEOID.values
+    gdf.loc[miss, "county"] = j.GEOID.map(name).values
+    return gdf
+
 def build(out_dir=None):
     out = Path(out_dir or config.INTERIM / "fields")
     out.mkdir(parents=True, exist_ok=True)
@@ -166,6 +183,7 @@ def build(out_dir=None):
             "Sumter": "12119", "Suwannee": "12121", "Taylor": "12123", "Union": "12125", "Volusia": "12127",
             "Wakulla": "12129", "Walton": "12131", "Washington": "12133"}  # US Census FIPS, Florida
     gdf["county_fips"] = gdf.county.map(fips)
+    gdf = fill_county(gdf, fips)
     gdf["area_ha"] = gdf.n_pixels * px_ha
     gdf["perimeter_m"] = gdf.length
     gdf["compactness"] = 4 * np.pi * gdf.area / gdf.length ** 2

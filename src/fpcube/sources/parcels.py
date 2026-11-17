@@ -58,8 +58,8 @@ def download(out=None, page=2000):
 
 
 def download_all_near_pasture(cell_m=10000, min_ha=5.0, out=None, page=2000):
-    """All parcels (any use code) intersecting 10 km cells that hold persistent pasture outside the
-    grazing-coded parcels. Needs fpcube.fields to have written persistent_pasture.tif and field_labels.tif."""
+    """All parcels (any use code) that intersect persistent-pasture patches lying outside the grazing-coded
+    parcels; patches are grouped by 10 km cell only to batch the spatial queries. Needs fpcube.fields to have written persistent_pasture.tif and field_labels.tif."""
     import numpy as np
     import rasterio
     from rasterio import features
@@ -130,8 +130,8 @@ def download_all_near_pasture(cell_m=10000, min_ha=5.0, out=None, page=2000):
     gdf = gpd.GeoDataFrame(pd.concat(frames, ignore_index=True), geometry="geometry", crs=config.CRS)
     gdf["geometry"] = gdf.geometry.make_valid()
     gdf.to_parquet(out)
-    meta = {"source": config.PARCEL_SERVICE, "rule": f"all parcels intersecting {cell_m} m cells with >= {min_ha} ha "
-            "of persistent pasture outside grazing-coded parcels", "n": len(gdf), "n_cells": len(cells),
+    meta = {"source": config.PARCEL_SERVICE, "rule": "all parcels (any use code) intersecting persistent-pasture patches of at least "
+            f"{config.MIN_FIELD_HA} ha that lie outside grazing-coded parcels (patches buffered 15 m)", "n": len(gdf), "n_cells": len(cells),
             "fields": config.PARCEL_FIELDS, "downloaded": pd.Timestamp.now("UTC").isoformat()}
     out.with_suffix(".json").write_text(json.dumps(meta, indent=2))
     return out
