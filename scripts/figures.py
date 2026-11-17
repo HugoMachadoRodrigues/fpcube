@@ -55,7 +55,7 @@ def fig1(rel):
     co.boundary.plot(ax=ax, color=AXIS, linewidth=0.3)
     for tier, col, lab in (("B", C[1], "Tier B: other parcel codes"), ("A", C[0], "Tier A: grazing-coded parcels")):
         g = f[f.tier == tier]
-        g.plot(ax=ax, color=col, linewidth=0, label=f"{lab} ({len(g):,} fields)")
+        g.plot(ax=ax, color=col, linewidth=0, rasterized=True, label=f"{lab} ({len(g):,} fields)")
     ona = gpd.GeoSeries(gpd.points_from_xy([ONA[0]], [ONA[1]]), crs=4326).to_crs(f.crs)
     ax.plot(ona.x, ona.y, marker="*", ms=9, color=INK, mec="white", mew=0.8, ls="none")
     import matplotlib.patheffects as pe
@@ -80,7 +80,7 @@ def fig1(rel):
     box = (x - 10000, y - 10000, x + 10000, y + 10000)
     sub = f.cx[box[0]:box[2], box[1]:box[3]]
     for tier, col in (("B", C[1]), ("A", C[0])):
-        sub[sub.tier == tier].plot(ax=ax3, color=col, edgecolor="white", linewidth=0.4)
+        sub[sub.tier == tier].plot(ax=ax3, color=col, edgecolor="white", linewidth=0.4, rasterized=True)
     ax3.plot(x, y, marker="*", ms=10, color=INK, mec="white", mew=0.8)
     ax3.set_xlim(box[0], box[2]); ax3.set_ylim(box[1], box[3])
     ax3.set_xticks([]); ax3.set_yticks([]); ax3.grid(False); ax3.set_xlabel(""); ax3.set_ylabel("")
