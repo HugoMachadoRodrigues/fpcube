@@ -1,6 +1,6 @@
 """Per-field optical series from Harmonized Landsat Sentinel-2 (HLS v2.0, S30 and L30), 2016-2026.
 
-Same product from two hosts: NASA LP DAAC (CMR-STAC, Earthdata login via ~/.netrc) before 2020 and
+Same product from two hosts: NASA LP DAAC (CMR granule search, Earthdata login via ~/.netrc) before 2020 and
 Microsoft Planetary Computer (hls2-s30 / hls2-l30, identical HLS v2.0 files) from 2020.
 
 For each MGRS tile that touches a field:
@@ -32,11 +32,9 @@ from rasterio.windows import Window
 
 from fpcube import config
 
-LP_STAC = "https://cmr.earthdata.nasa.gov/stac/LPCLOUD"
 PC_STAC = "https://planetarycomputer.microsoft.com/api/stac/v1"
 BANDS = {"S30": {"blue": "B02", "green": "B03", "red": "B04", "nir": "B8A", "swir1": "B11", "swir2": "B12"},
          "L30": {"blue": "B02", "green": "B03", "red": "B04", "nir": "B05", "swir1": "B06", "swir2": "B07"}}
-LP_COL = {"S30": "HLSS30_2.0", "L30": "HLSL30_2.0"}
 PC_COL = {"S30": "hls2-s30", "L30": "hls2-l30"}
 PC_START = "2020-01-01"
 OUT = config.INTERIM / "optical"
@@ -49,45 +47,97 @@ GDAL_ENV = dict(GDAL_DISABLE_READDIR_ON_OPEN="EMPTY_DIR", CPL_VSIL_CURL_ALLOWED_
 THREADS = int(os.environ.get("FPCUBE_THREADS", "24"))
 
 
-def _clients():
-    import planetary_computer as pc
-    import pystac_client
-    return (pystac_client.Client.open(LP_STAC),
-            pystac_client.Client.open(PC_STAC, modifier=pc.sign_inplace))
-
-
 def tile_of(item_id):
     return item_id.split(".")[2]                     # HLS.S30.T17RML.2016105T155922.v2.0
 
 
+CMR = "https://cmr.earthdata.nasa.gov/search/granules.umm_json"
+LP_SHORT = {"S30": "HLSS30", "L30": "HLSL30"}
+
+
+def _get(url, params, headers=None, tries=10):
+    import requests
+    for i in range(tries):
+        try:
+            r = requests.get(url, params=params, headers=headers or {}, timeout=120)
+            r.raise_for_status()
+            return r
+        except Exception as e:
+            if i == tries - 1:
+                raise
+            print(f"retry {params.get('temporal', '')}: {str(e)[:80]}", flush=True)
+            time.sleep(min(300, 15 * (i + 1)))
+
+
+def cmr_month(sensor, bbox, a, b):
+    """LP DAAC HLS granules from the CMR granule search (more robust than CMR-STAC for long harvests)."""
+    params = {"short_name": LP_SHORT[sensor], "version": "2.0", "bounding_box": ",".join(map(str, bbox)),
+              "temporal": f"{a}T00:00:00Z,{b}T23:59:59Z", "page_size": 2000}
+    rows, after = [], None
+    keep = set(BANDS[sensor].values()) | {"Fmask"}
+    while True:
+        r = _get(CMR, params, {"CMR-Search-After": after} if after else None)
+        for g in r.json().get("items", []):
+            u = g["umm"]
+            gid = u["GranuleUR"]
+            hrefs = {}
+            for link in u.get("RelatedUrls", []):
+                url = link.get("URL", "")
+                if url.startswith("https://") and url.endswith(".tif"):
+                    band = url.rsplit(".", 2)[-2]
+                    if band in keep:
+                        hrefs[band] = url
+            cc = next((float(x["Values"][0]) for x in u.get("AdditionalAttributes", [])
+                       if x.get("Name") == "CLOUD_COVERAGE"), None)
+            t = u["TemporalExtent"]["RangeDateTime"]["BeginningDateTime"]
+            rows.append({"id": gid, "tile": tile_of(gid), "sensor": sensor,
+                         "datetime": pd.Timestamp(t).tz_convert(None), "host": "lpdaac", "cloud": cc, "hrefs": hrefs})
+        after = r.headers.get("CMR-Search-After")
+        if not after or not r.json().get("items"):
+            return rows
+
+
+def pc_month(sensor, bbox, a, b, cat):
+    for i in range(10):
+        try:
+            its = list(cat.search(collections=[PC_COL[sensor]], bbox=bbox, datetime=f"{a}/{b}", limit=250).items())
+            break
+        except Exception as e:
+            if i == 9:
+                raise
+            print(f"search retry {sensor} {a}: {str(e)[:80]}", flush=True)
+            time.sleep(min(300, 15 * (i + 1)))
+    return [{"id": it.id, "tile": tile_of(it.id), "sensor": sensor,
+             "datetime": pd.Timestamp(it.datetime).tz_convert(None), "host": "pc",
+             "cloud": it.properties.get("eo:cloud_cover"),
+             "hrefs": {k: v.href for k, v in it.assets.items() if k in set(BANDS[sensor].values()) | {"Fmask"}}}
+            for it in its]
+
+
 def search_items(bbox, start=config.START, end=config.END):
-    """All S30/L30 items over bbox, LP DAAC before 2020 and Planetary Computer after."""
-    lp, pcc = _clients()
-    rows = []
-
-    def month_items(cat, col, a, b):
-        for i in range(8):
-            try:
-                return list(cat.search(collections=[col], bbox=bbox, datetime=f"{a}/{b}", limit=250).items())
-            except Exception as e:
-                if i == 7:
-                    raise
-                print(f"search retry {col} {a}: {str(e)[:80]}", flush=True)
-                time.sleep(15 * (i + 1))
-
+    """All S30/L30 items over bbox: LP DAAC (CMR) before 2020 and Planetary Computer after.
+    Each month is cached under OUT/catalog_months so an interrupted harvest resumes."""
+    import planetary_computer as pc
+    import pystac_client
+    cat = pystac_client.Client.open(PC_STAC, modifier=pc.sign_inplace)
+    cache = OUT / "catalog_months"
+    cache.mkdir(parents=True, exist_ok=True)
+    frames = []
     for sensor in ("S30", "L30"):
-        for cat, col, a0, b0 in ((lp, LP_COL[sensor], start, "2019-12-31"), (pcc, PC_COL[sensor], PC_START, end)):
+        for host, a0, b0 in (("lpdaac", start, "2019-12-31"), ("pc", PC_START, end)):
             for m0 in pd.date_range(a0, b0, freq="MS"):
-                m1 = min(m0 + pd.offsets.MonthEnd(0), pd.Timestamp(b0))
-                for it in month_items(cat, col, m0.strftime("%Y-%m-%d"), m1.strftime("%Y-%m-%d")):
-                    rows.append({"id": it.id, "tile": tile_of(it.id), "sensor": sensor,
-                                 "datetime": pd.Timestamp(it.datetime).tz_convert(None),
-                                 "host": "pc" if cat is pcc else "lpdaac",
-                                 "cloud": it.properties.get("eo:cloud_cover"),
-                                 "hrefs": {k: v.href for k, v in it.assets.items()
-                                           if k in set(BANDS[sensor].values()) | {"Fmask"}}})
-                print(f"catalog {sensor} {m0:%Y-%m}: {len(rows)} items", flush=True)
-    df = pd.DataFrame(rows).drop_duplicates("id")
+                p = cache / f"{sensor}_{host}_{m0:%Y-%m}.parquet"
+                if not p.exists():
+                    m1 = min(m0 + pd.offsets.MonthEnd(0), pd.Timestamp(b0))
+                    a, b = m0.strftime("%Y-%m-%d"), m1.strftime("%Y-%m-%d")
+                    rows = cmr_month(sensor, bbox, a, b) if host == "lpdaac" else pc_month(sensor, bbox, a, b, cat)
+                    df = pd.DataFrame(rows, columns=["id", "tile", "sensor", "datetime", "host", "cloud", "hrefs"])
+                    df["hrefs"] = df.hrefs.map(json.dumps)
+                    df.to_parquet(p, index=False)
+                    print(f"catalog {sensor} {host} {m0:%Y-%m}: {len(df)} items", flush=True)
+                frames.append(pd.read_parquet(p))
+    df = pd.concat(frames, ignore_index=True).drop_duplicates("id")
+    df["hrefs"] = df.hrefs.map(json.loads)
     return df.sort_values(["tile", "datetime"]).reset_index(drop=True)
 
 

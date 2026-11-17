@@ -56,7 +56,9 @@ def soil():
     res = []
     for k, it in enumerate(items):
         with rasterio.Env(GDAL_DISABLE_READDIR_ON_OPEN="EMPTY_DIR"):
-            src = {a: rasterio.open(it.assets[a].href) for a in ("mukey", "aws0_100", "soc0_100")}
+            if "mukey" not in it.assets:
+                continue
+            src = {a: rasterio.open(it.assets[a].href) for a in ("mukey", "aws0_100", "soc0_100") if a in it.assets}
             b = src["mukey"].bounds
             sub = f.cx[b.left:b.right, b.bottom:b.top]
             if not len(sub):
@@ -65,7 +67,7 @@ def soil():
             d["majority_frac"] = [float(np.max(fr)) if len(fr) else np.nan for fr in d["frac"]]
             d = d.drop(columns=["unique", "frac"])
             for a, col in (("aws0_100", "aws0_100_mm"), ("soc0_100", "soc0_100_gm2")):
-                d[col] = _zonal(src[a], sub, ["mean"])["mean"].values
+                d[col] = _zonal(src[a], sub, ["mean"])["mean"].values if a in src else np.nan
             d["tile"] = it.id
             res.append(d)
         print("soil tile", k + 1, len(items), flush=True)

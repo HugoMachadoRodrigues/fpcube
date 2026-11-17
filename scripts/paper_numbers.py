@@ -121,6 +121,25 @@ def tables(rel):
     t += ["\\bottomhline", "\\end{tabular}"]
     (MS / "tables" / "files.tex").write_text("\n".join(t) + "\n")
 
+    b1 = rel / "benchmark" / "task1_results.csv" if rel else None
+    if b1 and b1.exists():
+        r = pd.read_csv(b1)
+        names = {"persistence": "Persistence", "climatology": "Climatology", "lightgbm": "LightGBM",
+                 "transformer": "Transformer"}
+        t = ["\\begin{tabular}{llrrrr}", "\\tophline",
+             "Test set & Model & 15 d & 30 d & 45 d & 60 d\\\\", "\\middlehline"]
+        for split, lab in (("test", "Temporal (2025--2026)"), ("test_spatial", "Withheld counties")):
+            for m, nm in names.items():
+                d = r[(r.split == split) & (r.model == m)].set_index("horizon_days")
+                cells = [f"{d.loc[h, 'rmse']:.3f} ({100 * d.loc[h, 'skill_vs_ref']:+.0f})" if h in d.index else "--"
+                         for h in (15, 30, 45, 60)]
+                t.append(f"{lab if m == 'persistence' else ''} & {nm} & " + " & ".join(cells) + "\\\\")
+            t.append("\\middlehline" if split == "test" else "")
+        t += ["\\bottomhline", "\\end{tabular}"]
+        (MS / "tables" / "bench1.tex").write_text("\n".join(x for x in t if x) + "\n")
+    else:
+        (MS / "tables" / "bench1.tex").write_text(TBD + "\n")
+
 
 # Florida regions used by UF/IFAS Extension districts (simplified)
 _R = {"Northwest": "Bay Calhoun Escambia Franklin Gadsden Gulf Holmes Jackson Jefferson Leon Liberty Madison Okaloosa "

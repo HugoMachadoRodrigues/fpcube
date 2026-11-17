@@ -132,8 +132,64 @@ def task3(cube, fields):
                  "attention_mil": M.predict_mil(mil, [bags[i] for i in np.nonzero(te)[0]]).astype(int)}
         for k, p in preds.items():
             rows.append({"task": 3, "split": name, "model": k, **M.ordinal_metrics(y, np.clip(p, 0, 3))})
+        if name == "test":
+            from sklearn.metrics import confusion_matrix
+            best = max(preds, key=lambda k: M.ordinal_metrics(y, np.clip(preds[k], 0, 3))["qwk"])
+            cm = confusion_matrix(y, np.clip(preds[best], 0, 3), labels=[0, 1, 2, 3])
+            pd.DataFrame(cm, index=["none", "D0", "D1", "D2+"], columns=["none", "D0", "D1", "D2+"]).to_csv(
+                config.RELEASE / "_task3_confusion.csv")
     return pd.DataFrame(rows), u
 
+
+
+def paper_text(out):
+    """Sentences for the paper from the results tables (benchmark_text.json, read by scripts/paper_numbers.py)."""
+    t = {}
+    parts = []
+    if (out / "task1_results.csv").exists():
+        r = pd.read_csv(out / "task1_results.csv")
+        te = r[r.split == "test"].set_index(["model", "horizon_days"])
+        sp = r[r.split == "test_spatial"].set_index(["model", "horizon_days"])
+        best = max(("lightgbm", "transformer"), key=lambda m: te.loc[(m, 30), "skill_vs_ref"])
+        parts.append(
+            "In Task~1 (Table~\\ref{{tab:bench1}}), persistence has an RMSE of {p15:.3f} at 15 days against {c15:.3f} for "
+            "climatology, and {p60:.3f} against {c60:.3f} at 60 days. The best learned model ({bm}) reaches an RMSE of {b15:.3f} at 15 days and "
+            "{b60:.3f} at 60 days, a skill of {s30:.0f}\\,\\% over climatology at 30 days and {s60:.0f}\\,\\% at 60 days. "
+            "On counties withheld from training the skill at 30 days is {ss30:.0f}\\,\\%{transfer}.".format(
+                p15=te.loc[("persistence", 15), "rmse"], c15=te.loc[("climatology", 15), "rmse"],
+                p60=te.loc[("persistence", 60), "rmse"], c60=te.loc[("climatology", 60), "rmse"],
+                bm="LightGBM" if best == "lightgbm" else "transformer",
+                b15=te.loc[(best, 15), "rmse"], b60=te.loc[(best, 60), "rmse"],
+                s30=100 * te.loc[(best, 30), "skill_vs_ref"], s60=100 * te.loc[(best, 60), "skill_vs_ref"],
+                ss30=100 * sp.loc[(best, 30), "skill_vs_ref"],
+                transfer=(", so the model transfers to unseen counties with little loss"
+                          if sp.loc[(best, 30), "skill_vs_ref"] >= 0.8 * te.loc[(best, 30), "skill_vs_ref"]
+                          else ", a clear loss when moving to unseen counties")))
+    if (out / "task2_results.csv").exists():
+        r = pd.read_csv(out / "task2_results.csv")
+        ev = r[~r.event_id.str.startswith("all_")]
+        g = ev.groupby(["kind", "model"]).auroc.median().unstack()
+        lk = r[r.event_id.str.startswith("all_")].set_index("kind").auroc
+        rows = "; ".join(f"{k.replace('_', ' ')} {g.loc[k, 'lightgbm']:.2f}" for k in g.index)
+        t["TaskTwoSummary"] = ("event exposure is detected with a median AUROC per event of " + rows +
+                               " (LightGBM, leave-one-event-out)")
+        parts.append("In Task~2 the median AUROC per event is " + rows + " for LightGBM, against " +
+                     "; ".join(f"{g.loc[k, 'rule_dNDVI_dMNDWI']:.2f}" for k in g.index) +
+                     " for the NDVI--MNDWI change rule. When a whole event type is withheld the transformer reaches " +
+                     "; ".join(f"{k.replace('_', ' ')} {v:.2f}" for k, v in lk.items()) +
+                     ", which shows how much of the signal is specific to each kind of event.")
+    if (out / "task3_results.csv").exists():
+        r = pd.read_csv(out / "task3_results.csv").set_index(["split", "model"])
+        parts.append(
+            "In Task~3 the attention MIL model reaches a macro F1 of {mf:.2f} and a quadratic weighted kappa of {qk:.2f} "
+            "on the temporal test set, against {lf:.2f} and {lq:.2f} for LightGBM on bag statistics and {rf:.2f} and "
+            "{rq:.2f} for the anomaly cut points.".format(
+                mf=r.loc[("test", "attention_mil"), "macro_f1"], qk=r.loc[("test", "attention_mil"), "qwk"],
+                lf=r.loc[("test", "lightgbm_bag_stats"), "macro_f1"], lq=r.loc[("test", "lightgbm_bag_stats"), "qwk"],
+                rf=r.loc[("test", "rule_anomaly_cuts"), "macro_f1"], rq=r.loc[("test", "rule_anomaly_cuts"), "qwk"]))
+    t["BenchmarkResults"] = " ".join(parts) + " Figure~\\ref{fig:benchmark} summarises the results."
+    (out / "benchmark_text.json").write_text(json.dumps(t, indent=2))
+    return t
 
 def main():
     ap = argparse.ArgumentParser()
@@ -156,7 +212,10 @@ def main():
     if "task3" in a.tasks:
         r, u = task3(cube, fields)
         r.to_csv(out / "task3_results.csv", index=False)
+        if (config.RELEASE / "_task3_confusion.csv").exists():
+            (config.RELEASE / "_task3_confusion.csv").rename(out / "task3_confusion.csv")
         u[["county_fips", "valid_start", "y", "split"]].to_parquet(out / "task3_samples.parquet", index=False)
+    paper_text(out)
     print(json.dumps({"out": str(out)}))
 
 
