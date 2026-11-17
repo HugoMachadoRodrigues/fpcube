@@ -9,7 +9,7 @@ description = "Florida Pasture Cube: field-level, AI-ready time series of Florid
 readme = "README.md"
 requires-python = ">=3.11"
 license = {text = "MIT"}
-authors = [{name = "Hugo Machado Rodrigues"}, {name = "Golmar Golmohammadi"}]
+authors = [{name = "Hugo Rodrigues", email = "rodrigues.h@ufl.edu"}]
 dependencies = [
   "geopandas>=1.0", "rasterio>=1.3", "rioxarray", "xarray", "zarr>=3", "pyarrow", "dask", "distributed",
   "odc-stac", "pystac-client", "planetary-computer", "exactextract", "shapely>=2", "pyogrio",
