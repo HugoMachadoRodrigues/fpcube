@@ -188,6 +188,12 @@ def main():
     else:
         items = search(list(fields.to_crs(4326).total_bounds))
         items.to_parquet(cat, index=False)
+    for c in ("vv", "vh"):                       # missing assets come back from Parquet as NaN, not None
+        items[c] = items[c].astype(object).where(items[c].notna(), None)
+    no_vv = items.vv.isna()
+    if no_vv.any():                              # HH/HV acquisitions: no VV band, not comparable, left out
+        print(f"{int(no_vv.sum())} items without VV (HH/HV mode) left out", flush=True)
+    items = items[~no_vv]
     done_p = OUT / "done.json"
     done = set(json.loads(done_p.read_text())) if done_p.exists() else set()
     todo = items[~items.id.isin(done)]
@@ -206,9 +212,11 @@ def main():
         except Exception as e:
             return it.id, str(e)
 
+    failed = 0
     with ThreadPoolExecutor(WORKERS) as ex:
         for k, (iid, err) in enumerate(ex.map(work, todo.itertuples(index=False))):
             if err:
+                failed += 1
                 print(f"{iid} ERROR {err}", flush=True)
             else:
                 done.add(iid)
@@ -216,6 +224,8 @@ def main():
                 done_p.write_text(json.dumps(sorted(done)))
                 print(f"{k + 1}/{len(todo)} items, {(time.time() - t0) / (k + 1):.1f} s/item", flush=True)
     done_p.write_text(json.dumps(sorted(done)))
+    if failed:                                   # non-zero exit: the driver retries, only failed items rerun
+        raise SystemExit(f"{failed} S1 items failed")
 
 
 if __name__ == "__main__":
