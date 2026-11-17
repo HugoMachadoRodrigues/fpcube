@@ -61,8 +61,9 @@ def soil():
     items = list(cat.search(collections=["gnatsgo-rasters"], bbox=bbox).items())
     out = OUT / "soil"
     out.mkdir(parents=True, exist_ok=True)
-    res = []
-    for k, it in enumerate(items):
+    zonal_cache = out / "soil_zonal_tiles.parquet"
+    res = [] if not zonal_cache.exists() else None
+    for k, it in enumerate(items if res is not None else []):
         with rasterio.Env(GDAL_DISABLE_READDIR_ON_OPEN="EMPTY_DIR"):
             if "mukey" not in it.assets:
                 continue
@@ -80,7 +81,9 @@ def soil():
             d["tile"] = it.id
             res.append(d)
         print("soil tile", k + 1, len(items), flush=True)
-    d = pd.concat(res, ignore_index=True).sort_values("count").drop_duplicates("fid", keep="last").drop(columns="count")
+    if res is not None:
+        pd.concat(res, ignore_index=True).to_parquet(zonal_cache, index=False)
+    d = pd.read_parquet(zonal_cache).sort_values("count").drop_duplicates("fid", keep="last").drop(columns="count")
     d = d.rename(columns={"majority": "mukey", "majority_frac": "mukey_frac"})
     t = next(cat.search(collections=["gnatsgo-tables"], ids=["muaggatt"]).items())
     mua = pd.read_parquet(t.assets["data"].href, storage_options=t.assets["data"].extra_fields.get(
