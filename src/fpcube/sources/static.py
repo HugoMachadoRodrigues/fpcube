@@ -123,6 +123,35 @@ def dem_mosaic():
     return target
 
 
+def hydro_dem():
+    """DEM for flow routing: the open sea is set to nodata so that the coast acts as the outlet.
+
+    The 3DEP mosaic stores the Gulf and Atlantic as valid cells at or below 0 m. Left in, they form one enormous flat
+    that depression filling ramps up (tens of metres over thousands of cells), flooding the whole peninsula and
+    driving HAND to zero. Cells at or below 0 m that connect (8-neighbour) to the area outside the mosaic are removed;
+    inland cells below sea level (pits, quarries) are kept.
+    """
+    from scipy import ndimage
+    out = OUT / "terrain"
+    target = out / "dem30_5070_hydro.tif"
+    if target.exists():
+        return target
+    src = dem_mosaic()
+    with rasterio.open(src) as r:
+        a = r.read(1)
+        prof = r.profile
+    low = (a <= 0) | (a == -9999.0)
+    lab, _ = ndimage.label(low, structure=np.ones((3, 3), bool))
+    sea_ids = np.unique(lab[a == -9999.0])
+    sea = np.isin(lab, sea_ids[sea_ids > 0])
+    del lab
+    a = np.where(sea, -9999.0, a).astype(np.float32)
+    print(f"hydro DEM: {int(sea.sum()):,} sea or outside cells", flush=True)
+    with rasterio.open(target, "w", **prof) as d:
+        d.write(a, 1)
+    return target
+
+
 def _wbt(tool, wd, **kw):
     """Run a WhiteboxTools tool through the binary and fail loudly (the Python wrapper only returns a code)."""
     import subprocess
@@ -139,8 +168,10 @@ def _wbt(tool, wd, **kw):
 def terrain_rasters():
     out = OUT / "terrain"
     dem = dem_mosaic()
+    hdem = hydro_dem()
     p = {k: out / f"{k}.tif" for k in ("breached", "d8", "acc", "streams", "hand", "slope", "sca", "twi")}
-    steps = [("breached", "BreachDepressionsLeastCost", dict(dem=dem.name, output="breached.tif", dist=10, fill=True)),
+    steps = [("breached", "BreachDepressionsLeastCost", dict(dem=hdem.name, output="breached.tif", dist=10, fill=True,
+                                                                   flat_increment=1e-5)),
              ("d8", "D8Pointer", dict(dem="breached.tif", output="d8.tif")),
              ("acc", "D8FlowAccumulation", dict(input="breached.tif", output="acc.tif", out_type="cells")),
              ("streams", "ExtractStreams", dict(flow_accum="acc.tif", output="streams.tif", threshold=1111)),
