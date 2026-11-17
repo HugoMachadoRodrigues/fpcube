@@ -200,13 +200,14 @@ class Tile:
         self.dir.mkdir(parents=True, exist_ok=True)
         ref = items[(items.sensor == "S30")].copy()
         ref = ref[(ref.datetime >= "2021-01-01") & (ref.datetime < "2024-01-01")].sort_values("cloud")
-        self.ref_item = ref.iloc[0] if len(ref) else items.sort_values("cloud").iloc[0]
-        fm, src = _read(self.ref_item.hrefs["Fmask"], self.ref_item.host)
+        cands = ref.head(40) if len(ref) else items.sort_values("cloud").head(40)
+        first = cands.iloc[0]
+        fm, src = _read(first.hrefs["Fmask"], first.host)
         self.crs, self.transform, self.shape = src.crs, src.transform, fm.shape
         from shapely.geometry import box
         b = rasterio.transform.array_bounds(self.shape[0], self.shape[1], self.transform)
         f = fields.to_crs(self.crs)
-        f = f[f.intersects(box(b[1], b[0], b[3], b[2]))]
+        f = f[f.intersects(box(*b))]                    # array_bounds -> (west, south, east, north)
         inner = f.geometry.buffer(-15)
         inner = inner[~inner.is_empty]
         self.labels = features.rasterize(zip(inner, f.loc[inner.index, "fid"]), out_shape=self.shape,
@@ -217,6 +218,19 @@ class Tile:
         self.lut = np.zeros(self.labels.max() + 1, np.int64)
         self.lut[ids] = np.arange(len(ids))
         self.idx = self.lut[self.labels]
+        # reference: walk the 2021-2023 S30 scenes from least cloudy and take the first one whose clear pixels cover
+        # >= 60 % of the field pixels (else the best of the first 40). Cloud percentages ignore swath edges, so the
+        # least cloudy scenes are often thin slivers that miss the fields.
+        best, best_n, n_has = None, -1, int(self.has.sum())
+        for c in cands.itertuples(index=False):
+            fmc = fm if c.id == first.id else _read(c.hrefs["Fmask"], c.host)[0]
+            n_ok = int((clear_mask(fmc) & self.has).sum())
+            if n_ok > best_n:
+                best, best_n, best_fm = c, n_ok, fmc
+            if n_ok >= 0.6 * n_has:
+                break
+        self.ref_clear_frac = best_n / max(n_has, 1)
+        self.ref_item, fm = best, best_fm
         nir = BANDS[self.ref_item.sensor]["nir"]
         r, _ = _read(self.ref_item.hrefs[nir], self.ref_item.host)
         rc = clear_mask(fm)
@@ -262,7 +276,8 @@ class Tile:
         water = ((fm >> 5) & 1).astype(bool)[r0:r1, c0:c1][valid]
         out["water_frac"] = np.bincount(idx, weights=water, minlength=n) / np.maximum(cnt, 1)
         tot = np.bincount(self.idx[n_tot_px], minlength=n)
-        dy, dx, pk = phase_shift(self.ref_nir[r0:r1, c0:c1], arrs["nir"]) if (r1 - r0) >= 64 and (c1 - c0) >= 64 \
+        nir_clear = np.where(clear_mask(fm)[r0:r1, c0:c1], arrs["nir"], np.nan)
+        dy, dx, pk = phase_shift(self.ref_nir[r0:r1, c0:c1], nir_clear) if (r1 - r0) >= 64 and (c1 - c0) >= 64 \
             else (np.nan, np.nan, np.nan)
         keep = cnt > 0
         df = pd.DataFrame({k: v[keep] for k, v in out.items()})
