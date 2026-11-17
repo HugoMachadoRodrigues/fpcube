@@ -20,6 +20,7 @@ INK, INK2, MUTED, GRID, AXIS = "#0b0b0b", "#52514e", "#898781", "#e1e0d9", "#c3c
 SEQ = mpl.colors.LinearSegmentedColormap.from_list("seq", ["#cde2fb", "#86b6ef", "#2a78d6", "#184f95", "#0d366b"])
 DIV = mpl.colors.LinearSegmentedColormap.from_list("div", ["#a0461f", "#eb6834", "#f0efec", "#2a78d6", "#184f95"])
 ONA = (-81.93973, 27.3975)
+FIG3_START = "2021-01-01"   # Fig. 3 shows the last six seasons (Ian, Idalia, Helene, Milton, 2025-26 drought)
 
 mpl.rcParams.update({
     "font.family": "sans-serif", "font.sans-serif": ["Helvetica", "Arial", "DejaVu Sans"], "font.size": 8,
@@ -109,9 +110,11 @@ def fig2(rel):
     o = opt.groupby(["year", "sensor"]).size().unstack(fill_value=0) / nf
     bottom = np.zeros(len(o))
     for k, s in enumerate(o.columns):
-        axs[0].bar(o.index, o[s], bottom=bottom, color=C[k], width=0.8, label=s, edgecolor="white", linewidth=1)
+        axs[0].bar(o.index, o[s], bottom=bottom, color=C[k], width=0.8, edgecolor="white", linewidth=1,
+                   label={"L30": "Landsat 8/9 (L30)", "S30": "Sentinel-2 (S30)"}.get(s, s))
         bottom += o[s].to_numpy()
-    axs[0].set_title("a  Clear HLS obs. per field"); axs[0].legend(fontsize=7)
+    axs[0].set_title("a  Clear HLS obs. per field")
+    axs[0].legend(fontsize=6.5, ncol=2, loc="upper center", bbox_to_anchor=(0.5, -0.12))
     r = rad.groupby("year").size() / nf
     axs[1].bar(r.index, r.values, color=C[0], width=0.8)
     axs[1].set_title("b  Sentinel-1 acq. per field")
@@ -121,6 +124,9 @@ def fig2(rel):
     axs[2].bar(m.index, 100 * m.values, color=C[0], width=0.7)
     axs[2].set_xticks(range(1, 13), list("JFMAMJJASOND"))
     axs[2].set_title("c  Periods with optical data (%)")
+    for a in axs[:2]:
+        a.xaxis.set_major_locator(mpl.ticker.MultipleLocator(2))
+        a.xaxis.set_major_formatter(mpl.ticker.FormatStrFormatter("%d"))
     for a in axs:
         a.grid(axis="x", visible=False)
     fig.tight_layout()
@@ -136,8 +142,10 @@ def fig5(rel):
     order = ["persistence", "climatology", "lightgbm", "transformer"]
     for k, m in enumerate(order):
         d = r1[(r1.split == "test") & (r1.model == m)].sort_values("horizon_days")
-        axs[0].plot(d.horizon_days, d.rmse, marker="o", ms=4, color=C[k], label=m)
-    axs[0].set_xlabel("Lead time (days)"); axs[0].set_ylabel("NDVI RMSE"); axs[0].legend(fontsize=7)
+        axs[0].plot(d.horizon_days, d.rmse, marker="o", ms=4, color=C[k],
+                    label={"lightgbm": "LightGBM"}.get(m, m.capitalize()))
+    axs[0].set_xlabel("Lead time (days)"); axs[0].set_ylabel("NDVI RMSE")
+    axs[0].legend(fontsize=6.5, ncol=2, loc="upper center", bbox_to_anchor=(0.5, -0.28))
     axs[0].set_title("a  Task 1 (temporal test)")
     if (b / "task2_results.csv").exists():
         r2 = pd.read_csv(b / "task2_results.csv")
@@ -146,10 +154,12 @@ def fig5(rel):
         for k, m in enumerate(["rule_dNDVI_dMNDWI", "lightgbm"]):
             d = r2[r2.model == m]
             pos = [kinds.index(x) + (k - 0.5) * 0.3 for x in d.kind]
-            axs[1].scatter(pos, d.auroc, s=14, color=C[k], label=m.replace("_dNDVI_dMNDWI", ""), zorder=3)
+            axs[1].scatter(pos, d.auroc, s=14, color=C[k], zorder=3,
+                           label={"lightgbm": "LightGBM"}.get(m, "ΔNDVI–ΔMNDWI rule"))
         axs[1].set_xticks(range(len(kinds)), kinds, rotation=20)
         axs[1].axhline(0.5, color=MUTED, lw=0.8, ls="--")
-        axs[1].set_ylabel("AUROC (per event)"); axs[1].legend(fontsize=7)
+        axs[1].set_ylabel("AUROC (per event)")
+        axs[1].legend(fontsize=6.5, ncol=2, loc="upper center", bbox_to_anchor=(0.5, -0.28))
         axs[1].set_title("b  Task 2 (leave-one-event-out)")
     if (b / "task3_confusion.csv").exists():
         cm = pd.read_csv(b / "task3_confusion.csv", index_col=0).to_numpy()
@@ -203,14 +213,14 @@ def fig3(rel):
         ax.plot(times[gf], nd[gf], "o", ms=2.2, mfc="white", mec=C[0], mew=0.6, label="gap-filled")
         ax.set_ylabel("NDVI")
         ax.set_title(f"{'ab'[j]}  {row.field_id}, {row.county} County, {row.area_ha:.0f} ha")
-        if j == 0:
-            ax.legend(fontsize=6.5, loc="lower left", ncol=2)
+        if j == 1:
+            ax.legend(fontsize=6.5, loc="lower right", bbox_to_anchor=(1, 1.0), ncol=2, borderaxespad=0.2)
         ax = axs[1, j]
         ax.plot(times, c.vv_db.values, color=C[2], lw=0.9, label="VV")
         ax.plot(times, c.vh_db.values, color=C[6], lw=0.9, label="VH")
         ax.set_ylabel("$\\gamma^0$ (dB)")
-        if j == 0:
-            ax.legend(fontsize=6.5, loc="lower left", ncol=2)
+        if j == 1:
+            ax.legend(fontsize=6.5, loc="lower right", bbox_to_anchor=(1, 1.0), ncol=2, borderaxespad=0.2)
         ax = axs[2, j]
         ax.bar(times, c.ppt_sum.values, width=4, color=C[0], linewidth=0)
         ax.set_ylabel("Rain (mm/5 d)")
@@ -223,6 +233,7 @@ def fig3(rel):
         ax.set_yticks([]); ax.grid(False)
         ax.set_ylabel("USDM", rotation=0, ha="right", va="center")
         for ax in axs[:, j]:
+            ax.set_xlim(pd.Timestamp(FIG3_START), times[-1] + pd.Timedelta(days=5))
             for t in hurricane_days(hur):
                 ax.axvline(t, color=MUTED, lw=0.6, ls="--", zorder=0)
     handles = [mpl.patches.Patch(color=c_, label=l_) for c_, l_ in
@@ -256,7 +267,7 @@ def fig4(rel):
     co = counties()
     times = pd.DatetimeIndex(cube.time.values)
     ppt = cube.ppt_sum.values
-    fig, axs = plt.subplots(2, 3, figsize=(7.2, 5.0), gridspec_kw={"width_ratios": [1.15, 1, 1]})
+    fig, axs = plt.subplots(2, 3, figsize=(7.2, 5.6), gridspec_kw={"width_ratios": [1.7, 1, 1]})
     events = [("Hurricane Ian, 28 Sep 2022", pd.Timestamp("2022-09-28"), "vv_db", "ndvi"),
               ("Freeze, 17 Jan 2018", pd.Timestamp("2018-01-17"), "ndvi", "vv_db")]
     for r, (title, day, mapvar, other) in enumerate(events):
@@ -264,11 +275,11 @@ def fig4(rel):
         if r == 0:
             rain = np.nansum(ppt[:, k - 1:k + 1], axis=1)
             pos, neg = rain >= 200, rain < 50
-            lab_pos, lab_neg = "$\\geq$ 200 mm in 10 d", "< 50 mm"
+            lab_pos, lab_neg = "≥ 200 mm in 10 d", "< 50 mm"
         else:
             tmin = cube.tmin_mean.values[:, k] if "tmin_mean" in cube else np.full(len(f), np.nan)
             pos, neg = tmin <= 2, tmin >= 8
-            lab_pos, lab_neg = "5-day mean $T_{min}$ $\\leq$ 2 °C", "$\\geq$ 8 °C"
+            lab_pos, lab_neg = "5-day mean Tmin ≤ 2 °C", "≥ 8 °C"
         a = cube[mapvar].values
         delta = np.nanmedian(a[:, k + 1:k + 4], 1) - np.nanmedian(a[:, k - 6:k], 1)
         ax = axs[r, 0]
@@ -276,11 +287,11 @@ def fig4(rel):
         lim = np.nanpercentile(np.abs(delta), 95)
         pts = f.geometry.representative_point()
         ok = np.isfinite(delta)
-        ax.scatter(pts.x[ok], pts.y[ok], c=delta[ok], s=0.4, cmap=DIV if mapvar == "ndvi" else DIV.reversed(),
+        ax.scatter(pts.x[ok], pts.y[ok], c=delta[ok], s=0.8, cmap=DIV,
                    vmin=-lim, vmax=lim, rasterized=True, linewidths=0)
-        sm = mpl.cm.ScalarMappable(cmap=DIV if mapvar == "ndvi" else DIV.reversed(),
-                                   norm=mpl.colors.Normalize(-lim, lim))
-        fig.colorbar(sm, ax=ax, shrink=0.6, label=f"Δ{'NDVI' if mapvar == 'ndvi' else 'VV (dB)'}")
+        sm = mpl.cm.ScalarMappable(cmap=DIV, norm=mpl.colors.Normalize(-lim, lim))
+        fig.colorbar(sm, ax=ax, shrink=0.55, pad=0.01,
+                     label=f"Δ{'NDVI' if mapvar == 'ndvi' else 'VV (dB)'}, 15 d after vs 30 d before")
         ax.set_axis_off()
         ax.set_title(f"{'ad'[r]}  {title}", fontsize=8)
         for c_, (var, lab) in enumerate(((mapvar, None), (other, None))):
@@ -297,7 +308,7 @@ def fig4(rel):
             ax.set_ylabel("NDVI" if var == "ndvi" else "VV (dB)")
             ax.set_title(f"{'bcef'[2 * r + c_]}", fontsize=8)
             if c_ == 0:
-                ax.legend(fontsize=6.3, loc="best")
+                ax.legend(fontsize=6.3, loc="upper left", bbox_to_anchor=(0.0, -0.22), ncol=1)
     fig.tight_layout()
     save(fig, "fig4_events")
 

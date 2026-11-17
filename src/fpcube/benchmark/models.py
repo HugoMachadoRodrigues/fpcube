@@ -124,8 +124,8 @@ def _standardize(train, *others):
 
 def train_seq(Xtr, Str, ytr, Xva, Sva, yva, loss="mse", n_out=1, epochs=40, batch=2048, lr=2e-3, patience=5):
     set_seed()
-    (Xtr, Xva), _ = _standardize(Xtr, Xva)
-    (Str, Sva), _ = _standardize(Str, Sva)
+    (Xtr, Xva), xnorm = _standardize(Xtr, Xva)
+    (Str, Sva), snorm = _standardize(Str, Sva)
     model = SeqEncoder(Xtr.shape[-1], Str.shape[-1], seq_len=Xtr.shape[1], n_out=n_out).to(DEVICE)
     opt = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=1e-4)
     lf = nn.MSELoss() if loss == "mse" else nn.BCEWithLogitsLoss()
@@ -153,12 +153,15 @@ def train_seq(Xtr, Str, ytr, Xva, Sva, yva, loss="mse", n_out=1, epochs=40, batc
             if bad >= patience:
                 break
     model.load_state_dict(best_state)
-    model.norm = (_standardize(Xtr)[1], _standardize(Str)[1])
+    model.norm = (xnorm, snorm)            # training statistics, applied by predict_seq to raw inputs
     return model
 
 
 def predict_seq(model, X, S, standardized=False, batch=8192):
     model.eval()
+    if not standardized:
+        (xm, xs), (sm, ss) = model.norm
+        X, S = (X - xm) / xs, (S - sm) / ss
     out = []
     with torch.no_grad():
         for k in range(0, len(X), batch):

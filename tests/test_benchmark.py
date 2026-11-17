@@ -86,6 +86,11 @@ def test_seq_model_runs():
     net = M.train_seq(X[:300], S[:300], y[:300], X[300:], S[300:], y[300:], epochs=3)
     p = M.predict_seq(net, X[300:], S[300:])
     assert p.shape == (100, 1) and np.isfinite(p).all()
+    # raw inputs are standardized with the training statistics: shifting the inputs' units must not matter
+    X2, S2 = X * 10 + 3, S * 5 - 1
+    net2 = M.train_seq(X2[:300], S2[:300], y[:300], X2[300:], S2[300:], y[300:], epochs=3)
+    p2 = M.predict_seq(net2, X2[300:], S2[300:])
+    assert np.allclose(p, p2, atol=1e-3)
 
 
 def test_metrics():

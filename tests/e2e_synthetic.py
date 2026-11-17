@@ -86,7 +86,7 @@ wc.to_csv(rel / "validation" / "worldcover_by_field.csv", index=False)
 s = V.main("v1.0")
 print("validation ok:", s["ValidationPhysical"][:200])
 
-sys.argv = ["run", "task1", "task3", "--release", "v1.0", "--max-train", "200000"]
+sys.argv = ["run", "task1", "task3", "--release", "v1.0", "--max-train", "40000"]
 B.main()
 print(pd.read_csv(rel / "benchmark" / "task1_results.csv").query("horizon_days == 30 and split == 'test'"))
 print(pd.read_csv(rel / "benchmark" / "task3_results.csv"))
