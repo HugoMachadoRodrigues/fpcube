@@ -75,7 +75,7 @@ LAYERS = [
     ("Optical", "HLS v2.0 S30 and L30", "30 m; 2--3 d", "2016--2026", "blue, green, red, NIR, SWIR1, SWIR2; NDVI, EVI, NDMI, MNDWI, NBR; NDVI s.d.; water fraction; clear pixels; geometric shift"),
     ("Radar", "Sentinel-1 RTC (IW GRD)", "20 m; 6--12 d", "2016--2026", "VV, VH (linear and dB), VH/VV; orbit, pass, platform"),
     ("Weather", "PRISM daily", "4 km; daily", "2016--2026", "precipitation; mean, min, max temperature; max VPD"),
-    ("Soil", "gNATSGO", "10 m raster; map unit", "static", "map unit, AWS 0--100 cm, SOC 0--100 cm, drainage class, flooding, ponding, hydrologic group, water-table depth"),
+    ("Soil", "gNATSGO", "10 m raster; map unit", "static", "map unit, AWS 0--100 cm, SOC 0--100 cm, drainage class, flooding, hydrologic group, water-table depth"),
     ("Terrain", "3DEP 1 arc-second", "30 m", "static", "elevation, slope, TWI, HAND"),
     ("Wetlands", "NOAA C-CAP", "30 m", "latest", "wetland fraction in field and 500 m ring"),
     ("Drought", "US Drought Monitor", "county; weekly", "2016--2026", "percent area D0--D4 (cumulative), DSCI"),

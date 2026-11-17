@@ -89,7 +89,7 @@ def soil():
     mua = pd.read_parquet(t.assets["data"].href, storage_options=t.assets["data"].extra_fields.get(
         "table:storage_options", {}))
     mua["mukey"] = mua.mukey.astype(np.int64)
-    cols = {"drclassdcd": "drainage_class", "flodfreqdcd": "flooding_frequency", "pondfreqprs": "ponding_pct",
+    cols = {"drclassdcd": "drainage_class", "flodfreqdcd": "flooding_frequency",   # pondfreqprs is empty in gNATSGO
             "hydgrpdcd": "hydrologic_group", "wtdepannmin": "water_table_min_cm", "musym": "musym",
             "muname": "muname"}
     mua = mua[["mukey"] + [c for c in cols if c in mua]].rename(columns=cols)
