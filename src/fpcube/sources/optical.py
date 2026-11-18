@@ -44,7 +44,7 @@ GDAL_ENV = dict(GDAL_DISABLE_READDIR_ON_OPEN="EMPTY_DIR", CPL_VSIL_CURL_ALLOWED_
                 GDAL_HTTP_NETRC="YES",
                 GDAL_HTTP_COOKIEFILE=str(config.DATA / ".gdal_cookies"),
                 GDAL_HTTP_COOKIEJAR=str(config.DATA / ".gdal_cookies"))
-THREADS = int(os.environ.get("FPCUBE_THREADS", "24"))
+WORKERS = int(os.environ.get("FPCUBE_HLS_WORKERS", "12"))   # images read at once; the time goes into network waits
 
 
 def tile_of(item_id):
@@ -293,27 +293,34 @@ class Tile:
         df["shift_row"], df["shift_col"], df["shift_peak"] = dy, dx, pk
         return df.rename(columns={"cnt": "n_clear_px"})
 
+    def attempt(self, it):
+        try:
+            return it, self.process(it), None
+        except Exception as e:
+            return it, None, e
+
     def run(self, retry=True):
-        """Process every item not yet done; failed items (network errors) are retried once. Returns the failures."""
+        """Process every item not yet done, WORKERS at a time. Results are collected in catalog order, so the output
+        and the resume point do not depend on WORKERS. Failed items (network errors) are retried once.
+        Returns the failures."""
         todo = self.items[~self.items.id.isin(self.done)]
         failed = 0
         buf = {}
         t0 = time.time()
-        for k, it in enumerate(todo.itertuples(index=False)):
-            try:
-                df = self.process(it)
-            except Exception as e:
-                print(f"{self.tile} {it.id} ERROR {e}", flush=True)
-                failed += 1
-                continue
-            if df is not None and len(df):
-                buf.setdefault(it.datetime.year, []).append(df)
-            self.done.add(it.id)
-            if (k + 1) % 25 == 0 or k == len(todo) - 1:
-                self.flush(buf)
-                buf = {}
-                el = time.time() - t0
-                print(f"{self.tile} {k + 1}/{len(todo)} items, {el / (k + 1):.1f} s/item", flush=True)
+        with ThreadPoolExecutor(WORKERS) as ex:
+            for k, (it, df, err) in enumerate(ex.map(self.attempt, todo.itertuples(index=False))):
+                if err is None:
+                    if df is not None and len(df):
+                        buf.setdefault(it.datetime.year, []).append(df)
+                    self.done.add(it.id)
+                else:
+                    print(f"{self.tile} {it.id} ERROR {err}", flush=True)
+                    failed += 1
+                if (k + 1) % 25 == 0 or k == len(todo) - 1:
+                    self.flush(buf)
+                    buf = {}
+                    el = time.time() - t0
+                    print(f"{self.tile} {k + 1}/{len(todo)} items, {el / (k + 1):.1f} s/item", flush=True)
         self.flush(buf)
         if failed and retry:
             print(f"{self.tile} retrying {failed} failed items", flush=True)
@@ -326,8 +333,12 @@ class Tile:
             new = pd.concat(dfs, ignore_index=True)
             if p.exists():
                 new = pd.concat([pd.read_parquet(p), new], ignore_index=True).drop_duplicates(["fid", "item"])
-            new.to_parquet(p, index=False)
-        self.done_path.write_text(json.dumps(sorted(self.done)))
+            tmp = p.with_suffix(".tmp")                  # atomic: a kill during the write cannot damage the file
+            new.to_parquet(tmp, index=False)
+            os.replace(tmp, p)
+        tmp = self.done_path.with_suffix(".tmp")
+        tmp.write_text(json.dumps(sorted(self.done)))
+        os.replace(tmp, self.done_path)
 
 
 def main(tiles=None):
