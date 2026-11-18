@@ -293,8 +293,10 @@ class Tile:
         df["shift_row"], df["shift_col"], df["shift_peak"] = dy, dx, pk
         return df.rename(columns={"cnt": "n_clear_px"})
 
-    def run(self):
+    def run(self, retry=True):
+        """Process every item not yet done; failed items (network errors) are retried once. Returns the failures."""
         todo = self.items[~self.items.id.isin(self.done)]
+        failed = 0
         buf = {}
         t0 = time.time()
         for k, it in enumerate(todo.itertuples(index=False)):
@@ -302,6 +304,7 @@ class Tile:
                 df = self.process(it)
             except Exception as e:
                 print(f"{self.tile} {it.id} ERROR {e}", flush=True)
+                failed += 1
                 continue
             if df is not None and len(df):
                 buf.setdefault(it.datetime.year, []).append(df)
@@ -312,6 +315,10 @@ class Tile:
                 el = time.time() - t0
                 print(f"{self.tile} {k + 1}/{len(todo)} items, {el / (k + 1):.1f} s/item", flush=True)
         self.flush(buf)
+        if failed and retry:
+            print(f"{self.tile} retrying {failed} failed items", flush=True)
+            return self.run(retry=False)
+        return failed
 
     def flush(self, buf):
         for y, dfs in buf.items():
@@ -337,9 +344,13 @@ def main(tiles=None):
         tmp["hrefs"] = tmp.hrefs.map(json.dumps)
         tmp.to_parquet(cat_path, index=False)
     print(f"{len(items)} items over {items.tile.nunique()} tiles", flush=True)
-    n_with_fields = 0
+    n_with_fields = failed = 0
     for tile, g in items.groupby("tile"):
         if tiles and tile not in tiles:
+            continue
+        dp = OUT / tile / "done.json"
+        if dp.exists() and g.id.isin(set(json.loads(dp.read_text()))).all():
+            n_with_fields += 1                   # finished on an earlier run
             continue
         T = Tile(tile, g, fields)
         if not len(T.fids):
@@ -348,9 +359,11 @@ def main(tiles=None):
         n_with_fields += 1
         print(f"tile {tile}: {len(T.fids)} fields, {len(g)} items, reference {T.ref_item.id} "
               f"({100 * T.ref_clear_frac:.0f}% of field pixels clear)", flush=True)
-        T.run()
+        failed += T.run()
     if n_with_fields == 0:
         raise RuntimeError("no MGRS tile contains any field: check field/tile geometry")
+    if failed:                                   # non-zero exit: the driver retries, only failed items rerun
+        raise SystemExit(f"{failed} HLS items failed")
 
 
 if __name__ == "__main__":
