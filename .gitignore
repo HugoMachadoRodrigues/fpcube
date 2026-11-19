@@ -14,3 +14,8 @@ manuscript/*.bbl
 manuscript/*.out
 manuscript/*.synctex.gz
 manuscript/fpcube_essd.pdf
+
+# data and private documents live next to the code but are not versioned
+data/
+docs/
+.pytest_cache/

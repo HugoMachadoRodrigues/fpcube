@@ -5,12 +5,30 @@ Builds and reads the **Florida Pasture Cube**: every persistent pasture field in
 and PRISM weather. Each field also carries gNATSGO soil, 3DEP terrain (HAND, TWI), C-CAP wetlands, US Drought Monitor
 and NASS condition labels, hurricane tracks, and three benchmark tasks.
 
+## Project layout
+
+Everything for the project lives in this folder (OneDrive-Personal/Packages/FPCube):
+
+| Path | What | In git |
+|---|---|---|
+| `src/fpcube/` | pipeline package (sources, fields, cube, validation, benchmark, release) | yes |
+| `scripts/` | `pipeline.sh` (unattended build), `paper_numbers.py`, `figures.py`; `audit/` holds the cube and static-table audits | yes |
+| `manuscript/` | ESSD data paper (`fpcube_essd.tex`); numbers, tables and figures are generated, never typed | yes |
+| `tests/`, `notebooks/`, `config/` | tests and examples | yes |
+| `data/` | raw downloads, interim tables, `release/v1.0`, logs and pipeline state (~30 GB) | no |
+| `docs/` | proposal documents (AIIRI RFP, Track 2 proposal and concept) | no |
+
+The Python environment is kept outside OneDrive (`~/fpcube_env`, about 1.5 GB of small files). Recreate it with
+`uv venv ~/fpcube_env --python 3.12 && uv pip install --python ~/fpcube_env/bin/python -e .`
+
+Keep `data/` set to "Always keep on this device" in OneDrive, so that the pipeline never reads cloud-only files.
+
 ## Reading the release
 
 ```python
 import xarray as xr, geopandas as gpd
-cube = xr.open_zarr("v1.0/cube.zarr")            # dims: field x time
-fields = gpd.read_parquet("v1.0/fields.parquet")  # one row per field, EPSG:5070
+cube = xr.open_zarr("data/release/v1.0/cube.zarr")            # dims: field x time
+fields = gpd.read_parquet("data/release/v1.0/fields.parquet")  # one row per field, EPSG:5070
 ndvi = cube.ndvi.sel(field="FPC000123")
 ```
 
@@ -24,7 +42,7 @@ fpcube optical && fpcube radar                       # days; resumable
 fpcube cube && fpcube benchmark && fpcube release
 ```
 
-Data go to `$FPCUBE_DATA` (default `~/fpcube_data`). HLS before 2020 is read from NASA LP DAAC and needs an Earthdata
+Data go to `$FPCUBE_DATA` (default `data/` in this folder). HLS before 2020 is read from NASA LP DAAC and needs an Earthdata
 login in `~/.netrc`; everything else is public (Microsoft Planetary Computer, PRISM, CropScape, FDACS, USDM, NHC).
 
 ## Benchmark

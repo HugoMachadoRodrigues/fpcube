@@ -1,19 +1,19 @@
 #!/bin/bash
 # Self-healing driver for the Florida Pasture Cube build on a single machine.
 #
-#   caffeinate -i nohup bash scripts/pipeline.sh > ~/fpcube_data/pipeline.log 2>&1 &
+#   caffeinate -i nohup bash scripts/pipeline.sh > data/pipeline.log 2>&1 &
 #
 # Every extraction step is resumable, so the driver simply (re)starts any step that is not done and not running,
 # kills a step whose log has been silent for too long (hung network read) and restarts it, and gives up on a step
 # after MAX_TRIES failures. When all extraction steps are done it runs the downstream steps once, in order:
 # cube -> validation -> benchmark -> release -> paper numbers -> figures -> LaTeX.
 # State: $FPCUBE_DATA/state/<step>.done | .tries ; logs: $FPCUBE_DATA/logs/<step>.log
-# Stop it with:  touch ~/fpcube_data/state/STOP
+# Stop it with:  touch data/state/STOP
 
 set -u
-DATA=${FPCUBE_DATA:-$HOME/fpcube_data}
-PY=${FPCUBE_PY:-$HOME/fpcube_env/bin/python}
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
+DATA=${FPCUBE_DATA:-$REPO/data}
+PY=${FPCUBE_PY:-$HOME/fpcube_env/bin/python}
 MS="$REPO/manuscript"
 STATE="$DATA/state"; LOGS="$DATA/logs"
 mkdir -p "$STATE" "$LOGS"

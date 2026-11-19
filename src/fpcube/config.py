@@ -2,8 +2,9 @@
 from pathlib import Path
 import os
 
-# Data store outside OneDrive (large, regenerable). Override with FPCUBE_DATA.
-DATA = Path(os.environ.get("FPCUBE_DATA", Path.home() / "fpcube_data"))
+# Data store: data/ at the project root (not in git). Override with FPCUBE_DATA.
+ROOT = Path(__file__).resolve().parents[2]
+DATA = Path(os.environ.get("FPCUBE_DATA", ROOT / "data"))
 RAW = DATA / "raw"
 INTERIM = DATA / "interim"
 RELEASE = DATA / "release"
