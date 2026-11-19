@@ -2,9 +2,14 @@
 
 Calendar: 5-day periods starting config.COMPOSITE_ANCHOR (period k covers [anchor + 5k, anchor + 5k + 5) days).
 
-Optical composite (per field and period): observations with at least max(3 px, 30% of the field's pixels)
-clear and a geometric shift within 1 pixel are combined (median across observations of a period; when a field
-falls in two overlapping MGRS tiles on the same date the records are first merged weighted by clear pixels).
+Optical composite (per field and period): observations are used (flag 'qa_use') when they have at least
+max(3 px, 30% of the field's pixels) clear ('qa_clear'), a geometric shift within 1 pixel ('qa_geometry'), all six
+field-mean reflectances within [-0.01, 1] ('qa_range'; outside it are missed clouds above 1 and over-corrected
+atmosphere below -0.01, whose NDVI sits ~0.27 above the field's neighbouring dates), and field-mean blue reflectance
+at most 0.25 ('qa_haze'; above it NDVI drops ~0.45 below neighbouring dates, residual haze or thin cloud). Used
+observations are combined by the median across observations of a period; when a field falls in two overlapping MGRS
+tiles on the same date the records are first merged weighted by clear pixels. All observations stay in the long
+table with their flags.
 Gaps up to 30 days are filled by linear interpolation in time (flag 'gap_filled'); longer gaps stay empty.
 
 Radar composite: mean of linear gamma0 over the period's acquisitions (all orbits), converted to dB;
@@ -34,6 +39,9 @@ OPT_VARS = ["blue", "green", "red", "nir", "swir1", "swir2", "ndvi", "evi", "ndm
             "water_frac"]
 MAX_GAP_DAYS = 30
 MAX_SHIFT_PX = 1.0
+REFL_RANGE = (-0.01, 1.0)             # field-mean surface reflectance outside this is not a valid observation
+MAX_BLUE = 0.25                       # field-mean blue above this is residual haze or thin cloud
+REFL_BANDS = ["blue", "green", "red", "nir", "swir1", "swir2"]
 CHUNK = 8000                          # fields per composite chunk
 
 _REFL = "median over the period of the field-mean HLS v2.0 surface reflectance, {}"
@@ -56,7 +64,7 @@ VAR_ATTRS = {
     "water_frac": {"units": "1", "long_name": "median over the period of the fraction of clear field pixels "
                                               "flagged as water by Fmask"},
     "n_optical_obs": {"units": "1", "long_name": "number of HLS acquisition days in the period that passed the "
-                                                 "clear-sky and geometry screens"},
+                                                 "clear-sky, geometry, reflectance-range and haze screens"},
     "gap_filled": {"long_name": "optical values linearly interpolated in time (no observation in the period, gap "
                                 f"of at most {MAX_GAP_DAYS} days)"},
     "vv_db": {"units": "dB", "long_name": "Sentinel-1 RTC gamma0 VV, mean in linear power over the period's "
@@ -122,7 +130,11 @@ def screen_optical(d):
     ok_clear = (d.n_clear_px >= np.maximum(3, 0.3 * d.n_field_px))
     sh = np.hypot(d.shift_row.fillna(0), d.shift_col.fillna(0))
     ok_geo = sh <= MAX_SHIFT_PX
-    d = d.assign(qa_clear=ok_clear, qa_geometry=ok_geo, shift_px=sh)
+    r = d[REFL_BANDS]
+    ok_range = ((r >= REFL_RANGE[0]) & (r <= REFL_RANGE[1])).all(axis=1)
+    ok_haze = d.blue <= MAX_BLUE
+    d = d.assign(qa_clear=ok_clear, qa_geometry=ok_geo, qa_range=ok_range, qa_haze=ok_haze,
+                 qa_use=ok_clear & ok_geo & ok_range & ok_haze, shift_px=sh)
     return d
 
 
@@ -139,7 +151,7 @@ def merge_tiles(d):
 
 
 def optical_composites(obs, fids, times):
-    obs = obs[obs.qa_clear & obs.qa_geometry]
+    obs = obs[obs.qa_use]
     obs = merge_tiles(obs)
     obs["k"] = period_index(obs.date)
     obs = obs[(obs.k >= 0) & (obs.k < len(times))]
@@ -309,7 +321,8 @@ def build(version="v1.0"):
                            "(Microsoft Planetary Computer); PRISM AN81d daily",
                     time_coverage_start=str(times[0].date()), time_coverage_end=str(end.date()),
                     composite_days=config.COMPOSITE_DAYS, anchor=config.COMPOSITE_ANCHOR,
-                    max_gap_days_filled=MAX_GAP_DAYS, max_shift_px=MAX_SHIFT_PX)
+                    max_gap_days_filled=MAX_GAP_DAYS, max_shift_px=MAX_SHIFT_PX,
+                    reflectance_valid_min=REFL_RANGE[0], reflectance_valid_max=REFL_RANGE[1], max_blue_haze=MAX_BLUE)
     ds.chunk({"field": 2048, "time": 365}).to_zarr(rel / "cube.zarr", mode="w", consolidated=True, zarr_format=2)
 
     fields.to_parquet(rel / "fields.parquet")

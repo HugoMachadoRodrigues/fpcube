@@ -90,7 +90,9 @@ Following Gebru et al. (2021), *Datasheets for datasets*.
   per year, quality flags, soil, terrain and wetland attributes.
 - **Per field and period:** HLS reflectance and indices (with observation counts and gap-filling flag),
   Sentinel-1 VV/VH, PRISM weather.
-- **Per field and acquisition:** long tables with clear-pixel counts, geometric shift, sensor, orbit.
+- **Per field and acquisition:** long tables with clear-pixel counts, geometric shift, sensor, orbit; optical
+  records carry quality flags (`qa_clear`, `qa_geometry`, `qa_range`, `qa_haze`) and `qa_use`, the records that
+  enter the composites.
 - **Labels:** US Drought Monitor (county-week), NASS pasture condition (state-week), hurricane tracks.
 - **Missing data.** Optical gaps longer than 30 days are left empty on purpose. Radar coverage is thinner in
   2022-2024 after the Sentinel-1B failure.

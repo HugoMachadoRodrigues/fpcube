@@ -98,11 +98,11 @@ def fig2(rel):
     if not rel or not (rel / "optical_observations").exists():
         print("fig2: no release yet"); return
     import xarray as xr
-    opt = pd.concat(pd.read_parquet(p, columns=["fid", "date", "sensor", "qa_clear", "qa_geometry"])
+    opt = pd.concat(pd.read_parquet(p, columns=["fid", "date", "sensor", "qa_use"])
                     for p in (rel / "optical_observations").glob("*.parquet"))
     rad = pd.concat(pd.read_parquet(p, columns=["fid", "date", "platform"])
                     for p in (rel / "radar_observations").glob("*.parquet"))
-    opt = opt[opt.qa_clear & opt.qa_geometry]
+    opt = opt[opt.qa_use]
     opt["year"] = pd.to_datetime(opt.date).dt.year
     rad["year"] = pd.to_datetime(rad.date).dt.year
     nf = len(pd.read_parquet(rel / "fields.parquet", columns=["fid"]))

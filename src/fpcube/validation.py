@@ -73,11 +73,12 @@ def delineation_text(wc, fields):
 
 
 def coverage(rel, cube, fields):
-    opt = pd.concat(pd.read_parquet(p, columns=["fid", "date", "sensor", "qa_clear", "qa_geometry"])
+    opt = pd.concat(pd.read_parquet(p, columns=["fid", "date", "sensor", "qa_clear", "qa_geometry",
+                                                    "qa_range", "qa_haze", "qa_use"])
                     for p in (rel / "optical_observations").glob("*.parquet"))
     rad = pd.concat(pd.read_parquet(p, columns=["fid", "date"]) for p in (rel / "radar_observations").glob("*.parquet"))
     n = len(fields)
-    good = opt[opt.qa_clear & opt.qa_geometry]
+    good = opt[opt.qa_use]
     yrs = pd.to_datetime(good.date).dt.year
     per_year = good.groupby(yrs).size() / n
     rad_year = rad.groupby(pd.to_datetime(rad.date).dt.year).size() / n
@@ -87,19 +88,24 @@ def coverage(rel, cube, fields):
     wet = np.isin(month, [6, 7, 8, 9])
     stats = {"clear_per_field_year_median": float(per_year.median()), "clear_per_field_year_min": float(per_year.min()),
              "clear_per_field_year_max": float(per_year.max()), "clear_frac_of_all_obs": float(len(good) / len(opt)),
+             "clear_test_frac": float(opt.qa_clear.mean()),
              "geom_reject_frac": float((~opt.qa_geometry).mean()),
+             "range_reject_frac": float((opt.qa_clear & ~opt.qa_range).mean()),
+             "haze_reject_frac": float((opt.qa_clear & opt.qa_range & ~opt.qa_haze).mean()),
              "radar_per_field_year_median": float(rad_year.median()),
              "periods_with_optical": float(has.mean()), "periods_with_optical_wet": float(has[:, wet].mean()),
              "periods_with_optical_dry": float(has[:, ~wet].mean()),
              "periods_with_ndvi_after_fill": float(np.isfinite(cube.ndvi.values).mean()),
              "gap_filled_frac": float(filled.mean())}
-    txt = ("Of all field-level HLS observations, {cf:.0f}\\,\\% passed the clear-pixel test and {gr:.1f}\\,\\% were rejected "
-           "for a geometric shift above one pixel. A median field has {cm:.0f} usable optical observations per year "
+    txt = ("Of all field-level HLS observations, {ct:.0f}\\,\\% passed the clear-pixel test, {gr:.1f}\\,\\% were rejected "
+           "for a geometric shift above one pixel, and {rr:.2f}\\,\\% and {hr:.2f}\\,\\% of the clear ones for reflectance outside "
+           "[$-0.01$, 1] or blue reflectance above 0.25; {cf:.0f}\\,\\% were used. A median field has {cm:.0f} usable optical observations per year "
            "(range of yearly medians {cmin:.0f}--{cmax:.0f}, increasing as Landsat~9 and Sentinel-2C joined) and "
            "{rm:.0f} Sentinel-1 acquisitions. {po:.0f}\\,\\% of the 5-day periods have at least one optical observation "
            "({pd:.0f}\\,\\% in October--May, {pw:.0f}\\,\\% in June--September); after gap filling up to 30 days, "
            "{pf:.0f}\\,\\% of periods have an NDVI value, and {gf:.0f}\\,\\% of all values are interpolated.").format(
-        cf=100 * stats["clear_frac_of_all_obs"], gr=100 * stats["geom_reject_frac"],
+        cf=100 * stats["clear_frac_of_all_obs"], gr=100 * stats["geom_reject_frac"], ct=100 * stats["clear_test_frac"],
+        rr=100 * stats["range_reject_frac"], hr=100 * stats["haze_reject_frac"],
         cm=stats["clear_per_field_year_median"], cmin=per_year.min(), cmax=per_year.max(),
         rm=stats["radar_per_field_year_median"], po=100 * stats["periods_with_optical"],
         pd=100 * stats["periods_with_optical_dry"], pw=100 * stats["periods_with_optical_wet"],
