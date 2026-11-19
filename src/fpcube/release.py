@@ -117,7 +117,8 @@ def datasheet(rel):
     from fpcube.cube import calendar
     t = calendar()
     txt = DATASHEET.format(version=rel.name, n_fields=len(f), n_a=int((f.tier == "A").sum()),
-                           n_b=int((f.tier == "B").sum()), n_periods=len(t), start=t[0].date(), end=config.END)
+                           n_b=int((f.tier == "B").sum()), n_periods=len(t), start=t[0].date(),
+                           end=(t[-1] + pd.Timedelta(days=config.COMPOSITE_DAYS - 1)).date())
     (rel / "DATASHEET.md").write_text(txt)
 
 

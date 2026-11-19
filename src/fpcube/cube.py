@@ -36,10 +36,48 @@ MAX_GAP_DAYS = 30
 MAX_SHIFT_PX = 1.0
 CHUNK = 8000                          # fields per composite chunk
 
+_REFL = "median over the period of the field-mean HLS v2.0 surface reflectance, {}"
+_IDX = "median over the period of the field-mean of per-pixel {}"
+VAR_ATTRS = {
+    "field": {"long_name": "field identifier", "comment": "joins fields.parquet on field_id"},
+    "time": {"long_name": "start of the 5-day composite period", "comment": "period covers [time, time + 5 days)"},
+    "blue": {"units": "1", "long_name": _REFL.format("blue (S30 B02, L30 B02)")},
+    "green": {"units": "1", "long_name": _REFL.format("green (S30 B03, L30 B03)")},
+    "red": {"units": "1", "long_name": _REFL.format("red (S30 B04, L30 B04)")},
+    "nir": {"units": "1", "long_name": _REFL.format("near infrared (S30 B8A, L30 B05)")},
+    "swir1": {"units": "1", "long_name": _REFL.format("shortwave infrared 1.6 um (S30 B11, L30 B06)")},
+    "swir2": {"units": "1", "long_name": _REFL.format("shortwave infrared 2.2 um (S30 B12, L30 B07)")},
+    "ndvi": {"units": "1", "long_name": _IDX.format("NDVI")},
+    "evi": {"units": "1", "long_name": _IDX.format("EVI, clipped to [-1, 1]")},
+    "ndmi": {"units": "1", "long_name": _IDX.format("NDMI (nir - swir1) / (nir + swir1)")},
+    "mndwi": {"units": "1", "long_name": _IDX.format("MNDWI (green - swir1) / (green + swir1)")},
+    "nbr": {"units": "1", "long_name": _IDX.format("NBR (nir - swir2) / (nir + swir2)")},
+    "ndvi_sd": {"units": "1", "long_name": "median over the period of the within-field standard deviation of NDVI"},
+    "water_frac": {"units": "1", "long_name": "median over the period of the fraction of clear field pixels "
+                                              "flagged as water by Fmask"},
+    "n_optical_obs": {"units": "1", "long_name": "number of HLS acquisition days in the period that passed the "
+                                                 "clear-sky and geometry screens"},
+    "gap_filled": {"long_name": "optical values linearly interpolated in time (no observation in the period, gap "
+                                f"of at most {MAX_GAP_DAYS} days)"},
+    "vv_db": {"units": "dB", "long_name": "Sentinel-1 RTC gamma0 VV, mean in linear power over the period's "
+                                          "acquisitions, converted to dB"},
+    "vh_db": {"units": "dB", "long_name": "Sentinel-1 RTC gamma0 VH, mean in linear power over the period's "
+                                          "dual-polarisation acquisitions, converted to dB"},
+    "vh_vv_db": {"units": "dB", "long_name": "VH minus VV backscatter"},
+    "n_radar_obs": {"units": "1", "long_name": "number of Sentinel-1 acquisitions in the period"},
+    "ppt_sum": {"units": "mm", "long_name": "PRISM precipitation, sum over the period"},
+    "tmean_mean": {"units": "degC", "long_name": "PRISM mean daily temperature, mean over the period"},
+    "tmax_mean": {"units": "degC", "long_name": "PRISM maximum daily temperature, mean over the period"},
+    "tmin_mean": {"units": "degC", "long_name": "PRISM minimum daily temperature, mean over the period"},
+    "vpdmax_mean": {"units": "hPa", "long_name": "PRISM maximum daily vapour pressure deficit, mean over the period"},
+}
+
 
 def calendar():
+    """Start dates of the complete periods between COMPOSITE_ANCHOR and END (a trailing partial period is left out,
+    so every period sums or averages the same number of days)."""
     a = pd.Timestamp(config.COMPOSITE_ANCHOR)
-    n = int((pd.Timestamp(config.END) - a).days // config.COMPOSITE_DAYS) + 1
+    n = ((pd.Timestamp(config.END) - a).days + 1) // config.COMPOSITE_DAYS
     return a + pd.to_timedelta(np.arange(n) * config.COMPOSITE_DAYS, unit="D")
 
 
@@ -153,8 +191,9 @@ def radar_composites(obs, fids, times):
     obs = obs.assign(k=period_index(obs.date))
     obs = obs[(obs.k >= 0) & (obs.k < len(times))]
     w = obs.n_px.astype(float)
-    g = pd.concat([obs[["fid", "k"]], obs[["vv_lin"]].mul(w, axis=0), obs[["vh_lin"]].mul(w, axis=0), w.rename("w")],
-                  axis=1).groupby(["fid", "k"]).sum()
+    wh = w.where(np.isfinite(obs.vh_lin), 0.0)            # VV-only scenes carry no VH: no weight in the VH mean
+    g = pd.concat([obs[["fid", "k"]], (obs.vv_lin * w).rename("vv_lin"), (obs.vh_lin.fillna(0) * wh).rename("vh_lin"),
+                   w.rename("w_vv"), wh.rename("w_vh")], axis=1).groupby(["fid", "k"]).sum()
     g["n"] = obs.groupby(["fid", "k"]).size()
     fi = pd.Index(fids)
     r = fi.get_indexer(g.index.get_level_values(0))
@@ -163,8 +202,10 @@ def radar_composites(obs, fids, times):
     out = {}
     for v in ("vv", "vh"):
         a = np.full((len(fids), len(times)), np.nan, np.float32)
+        wv = g[f"w_{v}"].to_numpy()
         with np.errstate(divide="ignore", invalid="ignore"):
-            a[r[keep], k[keep]] = 10 * np.log10((g[f"{v}_lin"] / g.w).to_numpy()[keep])
+            m = np.where(wv > 0, g[f"{v}_lin"].to_numpy() / wv, np.nan)
+            a[r[keep], k[keep]] = 10 * np.log10(m[keep])
         out[f"{v}_db"] = a
     n = np.zeros((len(fids), len(times)), np.uint8)
     n[r[keep], k[keep]] = np.minimum(g.n.to_numpy()[keep], 255)
@@ -246,7 +287,8 @@ def build(version="v1.0"):
         print(f"cube fields {k0 + CHUNK}/{len(fids)}", flush=True)
     wx = weather_composites(fields, times)
 
-    ds = xr.Dataset(coords={"field": fields.field_id.to_numpy(), "time": times})
+    ids = fields.field_id.to_numpy().astype(str)          # fixed-width text: readable by any Zarr v2 reader
+    ds = xr.Dataset(coords={"field": ids, "time": times})
     for v, a in opt.items():
         ds[v] = (("field", "time"), a)
     ds["n_optical_obs"] = (("field", "time"), nobs)
@@ -256,11 +298,19 @@ def build(version="v1.0"):
     ds["n_radar_obs"] = (("field", "time"), nrad)
     for v, a in wx.items():
         ds[v] = (("field", "time"), a)
-    ds.attrs.update(title="Florida Pasture Cube", version=version, composite_days=config.COMPOSITE_DAYS,
-                    anchor=config.COMPOSITE_ANCHOR, license="CC-BY-4.0",
+    for v in ds.variables:
+        ds[v].attrs.update(VAR_ATTRS.get(v, {}))
+    end = times[-1] + pd.Timedelta(days=config.COMPOSITE_DAYS - 1)
+    ds.attrs.update(title="Florida Pasture Cube", version=version, license="CC-BY-4.0", Conventions="CF-1.10",
+                    summary="Per-field 5-day composites of HLS v2.0 optical reflectance and indices, Sentinel-1 RTC "
+                            "backscatter and PRISM daily weather for Florida pasture fields; static field attributes "
+                            "are in fields.parquet (join on field_id).",
+                    source="NASA HLS v2.0 S30/L30 (LP DAAC, Microsoft Planetary Computer); Sentinel-1 RTC "
+                           "(Microsoft Planetary Computer); PRISM AN81d daily",
+                    time_coverage_start=str(times[0].date()), time_coverage_end=str(end.date()),
+                    composite_days=config.COMPOSITE_DAYS, anchor=config.COMPOSITE_ANCHOR,
                     max_gap_days_filled=MAX_GAP_DAYS, max_shift_px=MAX_SHIFT_PX)
-    enc = {v: {"compressors": None} for v in ()}
-    ds.chunk({"field": 2048, "time": 365}).to_zarr(rel / "cube.zarr", mode="w", consolidated=True)
+    ds.chunk({"field": 2048, "time": 365}).to_zarr(rel / "cube.zarr", mode="w", consolidated=True, zarr_format=2)
 
     fields.to_parquet(rel / "fields.parquet")
     for kind, sub in (("optical", "optical_observations"), ("radar", "radar_observations")):
@@ -270,7 +320,7 @@ def build(version="v1.0"):
             if not len(d):
                 continue
             if kind == "optical":
-                d = screen_optical(d).drop(columns=["item"], errors="ignore")
+                d = screen_optical(d)                     # keeps 'item', the HLS granule id
             d.to_parquet(rel / sub / f"{y}.parquet", index=False)
     (rel / "labels").mkdir()
     for p in (config.RAW / "labels").glob("*.parquet"):

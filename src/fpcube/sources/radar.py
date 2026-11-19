@@ -28,6 +28,11 @@ GDAL_ENV = dict(GDAL_DISABLE_READDIR_ON_OPEN="EMPTY_DIR", CPL_VSIL_CURL_ALLOWED_
                 GDAL_HTTP_MAX_RETRY="6", GDAL_HTTP_RETRY_DELAY="4", GDAL_HTTP_MULTIPLEX="YES", GDAL_HTTP_MERGE_CONSECUTIVE_RANGES="YES",
                 GDAL_CACHEMAX=512)
 WORKERS = int(os.environ.get("FPCUBE_S1_WORKERS", "6"))
+# Pixels below these values are not backscatter: scenes processed before IPF 2.90 (13 March 2018) carry strips of
+# near-zero border noise (about -47 dB) along the swath edges, which would drag field means down. No field pixel
+# of later scenes falls below them.
+MIN_VV = 10 ** (-30 / 10)
+MIN_VH = 10 ** (-35 / 10)
 
 
 def search(bbox):
@@ -151,12 +156,12 @@ def process(it, fields):
                     raise
                 local.__dict__.pop("h", None)
                 time.sleep(5 * (attempt + 1))
-        ok = (lb > 0) & np.isfinite(vv) & (vv > 0)
+        ok = (lb > 0) & np.isfinite(vv) & (vv >= MIN_VV)
         if nod is not None:
             ok &= vv != nod
         idx = lb[ok]
         vh = vh[ok]
-        okh = np.isfinite(vh) & (vh > 0)
+        okh = np.isfinite(vh) & (vh >= MIN_VH)
         return (np.bincount(idx, minlength=nmax), np.bincount(idx, weights=vv[ok], minlength=nmax),
                 np.bincount(idx[okh], minlength=nmax), np.bincount(idx[okh], weights=vh[okh], minlength=nmax))
 
