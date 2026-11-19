@@ -5,7 +5,8 @@ Soil: majority map unit (mukey) per field from the gNATSGO 10 m raster, joined t
 means of available water storage 0-100 cm and soil organic carbon 0-100 cm.
 Terrain: 3DEP seamless 1 arc-second mosaic reprojected to the CDL grid (EPSG:5070, 30 m); WhiteboxTools
 least-cost depression breaching, D8 flow accumulation, streams at 1 km2 contributing area, height above
-nearest drainage (HAND, ElevationAboveStream) and topographic wetness index. Per field: mean elevation,
+nearest drainage (HAND, ElevationAboveStream) and topographic wetness index ln(SCA / tan slope), tan slope floored
+at 0.001 so that flat cells have a value. Per field: mean elevation,
 slope, HAND and TWI.
 Wetlands: NOAA C-CAP wetland classes, fraction inside the field and inside a 500 m ring around it.
 """
@@ -178,13 +179,44 @@ def terrain_rasters():
              ("hand", "ElevationAboveStream", dict(dem="breached.tif", streams="streams.tif", output="hand.tif")),
              ("slope", "Slope", dict(dem=dem.name, output="slope.tif", units="degrees")),
              ("sca", "D8FlowAccumulation", dict(input="breached.tif", output="sca.tif",
-                                                out_type="specific contributing area")),
-             ("twi", "WetnessIndex", dict(sca="sca.tif", slope="slope.tif", output="twi.tif"))]
+                                                out_type="specific contributing area"))]
     for key, tool, kw in steps:                       # 1111 cells of 30 m = 1 km2 stream initiation
         if not p[key].exists():
             print("whitebox", tool, flush=True)
             _wbt(tool, out, **kw)
+    if not p["twi"].exists():
+        wetness_index(p["sca"], p["slope"], p["twi"])
     return dem, {k: str(v) for k, v in p.items()}
+
+
+MIN_TAN_SLOPE = 0.001   # floor on tan(slope): WetnessIndex leaves flat cells (slope 0) empty, and 1.7% of fields,
+                        # flat in the 30 m DEM and among the wettest, then had no TWI at all
+
+
+def wetness_index(sca, slope, out):
+    """Topographic wetness index ln(SCA / tan(slope)) with tan(slope) floored at MIN_TAN_SLOPE, block by block."""
+    tmp = Path(str(out) + ".tmp.tif")
+    with rasterio.open(sca) as a, rasterio.open(slope) as b:
+        if a.shape != b.shape or a.transform != b.transform:
+            raise ValueError("sca and slope grids differ")
+        prof = a.profile.copy()
+        prof.update(dtype="float32", nodata=-9999.0, compress="deflate", predictor=3, tiled=True,
+                    blockxsize=512, blockysize=512, BIGTIFF="IF_SAFER")
+        with rasterio.open(tmp, "w", **prof) as d:
+            for _, w in d.block_windows(1):
+                s_ = a.read(1, window=w).astype(np.float64)
+                sl = b.read(1, window=w).astype(np.float64)
+                ok = np.isfinite(s_) & np.isfinite(sl) & (s_ > 0)
+                if a.nodata is not None:
+                    ok &= s_ != a.nodata
+                if b.nodata is not None:
+                    ok &= sl != b.nodata
+                t = np.maximum(np.tan(np.radians(np.where(ok, sl, 0.0))), MIN_TAN_SLOPE)
+                twi = np.full(s_.shape, -9999.0, np.float32)
+                twi[ok] = np.log(s_[ok] / t[ok])
+                d.write(twi, 1, window=w)
+    tmp.rename(out)
+    return out
 
 
 def terrain():
@@ -210,13 +242,23 @@ def wetlands():
     ring = f.copy()
     ring["geometry"] = f.buffer(500).difference(f.geometry)
     with rasterio.open(href) as s:
-        fr = _zonal(s, f.to_crs(s.crs), ["frac"])
-        rr = _zonal(s, ring.to_crs(s.crs), ["frac"])
+        fr = _zonal(s, f.to_crs(s.crs), ["unique", "frac"])
+        rr = _zonal(s, ring.to_crs(s.crs), ["unique", "frac"])
 
     def wet(df):
-        cols = [c for c in df.columns if c.startswith("frac_")]
-        return df[[c for c in cols if int(c.split("_")[1]) in CCAP_WET]].sum(axis=1)
-    d = pd.DataFrame({"fid": f.fid.values, "wetland_frac": wet(fr).values, "wetland_frac_500m": wet(rr).values})
+        """exactextract returns the classes and their area fractions as lists per polygon. Share of wetland
+        classes among mapped pixels (class 0, background outside the map, is left out of the denominator)."""
+        out = []
+        for u, fr_ in zip(df["unique"], df["frac"]):
+            u, fr_ = np.asarray(u, int), np.asarray(fr_, float)
+            tot = fr_[u > 0].sum()
+            out.append(fr_[np.isin(u, CCAP_WET)].sum() / tot if tot > 0 else np.nan)
+        return pd.Series(out, index=df.fid.values)
+    d = pd.DataFrame({"fid": f.fid.values})
+    d["wetland_frac"] = wet(fr).reindex(d.fid).values
+    d["wetland_frac_500m"] = wet(rr).reindex(d.fid).values
+    if not (d.wetland_frac_500m > 0).any():                  # the old column lookup silently returned all zeros
+        raise RuntimeError("no wetland pixel around any field: class fractions were not read")
     d["ccap_year"] = int(it.properties["start_datetime"][:4])
     (OUT / "wetlands").mkdir(parents=True, exist_ok=True)
     d.to_parquet(OUT / "wetlands" / "wetlands_by_field.parquet", index=False)

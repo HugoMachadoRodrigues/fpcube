@@ -59,22 +59,41 @@ def _read(year):
         return s.read(1)
 
 
+FIPS = {"Alachua": "12001", "Baker": "12003", "Bay": "12005", "Bradford": "12007", "Brevard": "12009",
+        "Broward": "12011", "Calhoun": "12013", "Charlotte": "12015", "Citrus": "12017", "Clay": "12019",
+        "Collier": "12021", "Columbia": "12023", "DeSoto": "12027", "Dixie": "12029", "Duval": "12031",
+        "Escambia": "12033", "Flagler": "12035", "Franklin": "12037", "Gadsden": "12039", "Gilchrist": "12041",
+        "Glades": "12043", "Gulf": "12045", "Hamilton": "12047", "Hardee": "12049", "Hendry": "12051",
+        "Hernando": "12053", "Highlands": "12055", "Hillsborough": "12057", "Holmes": "12059", "Indian River":
+        "12061", "Jackson": "12063", "Jefferson": "12065", "Lafayette": "12067", "Lake": "12069", "Lee":
+        "12071", "Leon": "12073", "Levy": "12075", "Liberty": "12077", "Madison": "12079", "Manatee": "12081",
+        "Marion": "12083", "Martin": "12085", "Miami-Dade": "12086", "Monroe": "12087", "Nassau": "12089",
+        "Okaloosa": "12091", "Okeechobee": "12093", "Orange": "12095", "Osceola": "12097", "Palm Beach":
+        "12099", "Pasco": "12101", "Pinellas": "12103", "Polk": "12105", "Putnam": "12107", "St. Johns":
+        "12109", "St. Lucie": "12111", "Santa Rosa": "12113", "Sarasota": "12115", "Seminole": "12117",
+        "Sumter": "12119", "Suwannee": "12121", "Taylor": "12123", "Union": "12125", "Volusia": "12127",
+        "Wakulla": "12129", "Walton": "12131", "Washington": "12133"}  # US Census FIPS, Florida
 
-def fill_county(gdf, fips):
-    """Parcels without a county number: take the county containing the field's representative point
-    (US Census 2023 cartographic boundaries, raw/boundaries/fl_counties.parquet)."""
-    miss = gdf.county_fips.isna()
+
+def assign_county(gdf, fips=FIPS):
+    """County holding the largest share of each field's area (US Census 2023 cartographic boundaries,
+    raw/boundaries/fl_counties.parquet). The tax-roll county (FDOR CO_NO) is kept only where the boundary file
+    gives none: in 76 fields the parcel's roll county holds less than half of the field (22 lie wholly outside it),
+    which would put them in the wrong county for county-level labels."""
     p = config.RAW / "boundaries" / "fl_counties.parquet"
-    if not miss.any() or not p.exists():
+    if not p.exists():
         return gdf
-    co = gpd.read_parquet(p).to_crs(gdf.crs)
-    pts = gpd.GeoDataFrame(geometry=gdf.loc[miss].geometry.representative_point(), crs=gdf.crs)
-    j = gpd.sjoin(pts, co[["GEOID", "geometry"]], how="left", predicate="within")
-    j = j[~j.index.duplicated()]
+    co = gpd.read_parquet(p).to_crs(gdf.crs)[["GEOID", "geometry"]]
+    ov = gpd.overlay(gdf[["fid", "geometry"]], co, how="intersection", keep_geom_type=True)
+    ov["a"] = ov.geometry.area
+    best = ov.sort_values("a").drop_duplicates("fid", keep="last").set_index("fid").GEOID
     name = {v: k for k, v in fips.items()}
-    gdf.loc[miss, "county_fips"] = j.GEOID.values
-    gdf.loc[miss, "county"] = j.GEOID.map(name).values
+    g = gdf.fid.map(best)
+    has = g.notna()
+    gdf.loc[has, "county_fips"] = g[has].values
+    gdf.loc[has, "county"] = g[has].map(name).values
     return gdf
+
 
 def build(out_dir=None):
     out = Path(out_dir or config.INTERIM / "fields")
@@ -168,22 +187,8 @@ def build(out_dir=None):
                       "pasture_years_mean": freq_mean, "pidx": parcel_of, **annual}).iloc[1:]
     gdf = gdf.merge(a, on="fid").merge(parcels[["pidx", "CO_NO", "DOR_UC", "AgTaxExempt"]], on="pidx", how="left")
     gdf["county"] = gdf.CO_NO.map(lambda c: COUNTIES.get(int(c)) if pd.notna(c) else None)
-    fips = {"Alachua": "12001", "Baker": "12003", "Bay": "12005", "Bradford": "12007", "Brevard": "12009",
-            "Broward": "12011", "Calhoun": "12013", "Charlotte": "12015", "Citrus": "12017", "Clay": "12019",
-            "Collier": "12021", "Columbia": "12023", "DeSoto": "12027", "Dixie": "12029", "Duval": "12031",
-            "Escambia": "12033", "Flagler": "12035", "Franklin": "12037", "Gadsden": "12039", "Gilchrist": "12041",
-            "Glades": "12043", "Gulf": "12045", "Hamilton": "12047", "Hardee": "12049", "Hendry": "12051",
-            "Hernando": "12053", "Highlands": "12055", "Hillsborough": "12057", "Holmes": "12059", "Indian River":
-            "12061", "Jackson": "12063", "Jefferson": "12065", "Lafayette": "12067", "Lake": "12069", "Lee":
-            "12071", "Leon": "12073", "Levy": "12075", "Liberty": "12077", "Madison": "12079", "Manatee": "12081",
-            "Marion": "12083", "Martin": "12085", "Miami-Dade": "12086", "Monroe": "12087", "Nassau": "12089",
-            "Okaloosa": "12091", "Okeechobee": "12093", "Orange": "12095", "Osceola": "12097", "Palm Beach":
-            "12099", "Pasco": "12101", "Pinellas": "12103", "Polk": "12105", "Putnam": "12107", "St. Johns":
-            "12109", "St. Lucie": "12111", "Santa Rosa": "12113", "Sarasota": "12115", "Seminole": "12117",
-            "Sumter": "12119", "Suwannee": "12121", "Taylor": "12123", "Union": "12125", "Volusia": "12127",
-            "Wakulla": "12129", "Walton": "12131", "Washington": "12133"}  # US Census FIPS, Florida
-    gdf["county_fips"] = gdf.county.map(fips)
-    gdf = fill_county(gdf, fips)
+    gdf["county_fips"] = gdf.county.map(FIPS)
+    gdf = assign_county(gdf)
     gdf["area_ha"] = gdf.n_pixels * px_ha
     gdf["perimeter_m"] = gdf.length
     gdf["compactness"] = 4 * np.pi * gdf.area / gdf.length ** 2

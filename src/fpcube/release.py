@@ -95,7 +95,9 @@ Following Gebru et al. (2021), *Datasheets for datasets*.
   enter the composites.
 - **Labels:** US Drought Monitor (county-week), NASS pasture condition (state-week), hurricane tracks.
 - **Missing data.** Optical gaps longer than 30 days are left empty on purpose. Radar coverage is thinner in
-  2022-2024 after the Sentinel-1B failure.
+  2022-2024 after the Sentinel-1B failure. `water_table_min_cm` is empty where gNATSGO records no water table in
+  the soil profile (mostly excessively and well-drained soils): read it as deeper than about 2 m, not as unknown.
+  `twi_mean` uses tan(slope) >= 0.001, so flat fields have a value.
 - **Sensitive data.** None. Parcel owner names were never downloaded.
 
 ## Collection and preprocessing
