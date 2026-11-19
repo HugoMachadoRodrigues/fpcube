@@ -123,7 +123,7 @@ def optical_composites(obs, fids, times):
     for v in OPT_VARS:
         a = arr[v]
         df = pd.DataFrame(a.T)
-        f = df.interpolate(limit=lim, limit_area="inside", axis=0).to_numpy().T
+        f = df.interpolate(limit=lim, limit_area="inside", axis=0).to_numpy(copy=True).T   # writable
         # do not fill across gaps longer than lim: pandas fills the first lim steps of longer gaps, undo that
         isn = np.isnan(a)
         runs = _run_lengths(isn)
@@ -136,16 +136,13 @@ def optical_composites(obs, fids, times):
 
 def _run_lengths(mask):
     """Length of the run of True values each True cell belongs to (along axis 1)."""
-    out = np.zeros(mask.shape, np.int32)
-    for i in range(mask.shape[0]):
-        m = mask[i]
-        if not m.any():
-            continue
-        d = np.diff(np.concatenate([[0], m.astype(np.int8), [0]]))
-        starts, ends = np.nonzero(d == 1)[0], np.nonzero(d == -1)[0]
-        for s, e in zip(starts, ends):
-            out[i, s:e] = e - s
-    return out
+    n, t = mask.shape
+    m = np.concatenate([mask, np.zeros((n, 1), bool)], axis=1).ravel()   # a False column keeps rows apart
+    d = np.diff(np.concatenate([[0], m.astype(np.int8), [0]]))
+    lengths = np.nonzero(d == -1)[0] - np.nonzero(d == 1)[0]
+    out = np.zeros(m.shape, np.int32)
+    out[m] = np.repeat(lengths, lengths)                                  # True cells come run by run, in order
+    return out.reshape(n, t + 1)[:, :t]
 
 
 def load_radar(lo=None, hi=None, start=None, end=None):
