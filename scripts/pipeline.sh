@@ -14,7 +14,7 @@ set -u
 DATA=${FPCUBE_DATA:-$HOME/fpcube_data}
 PY=${FPCUBE_PY:-$HOME/fpcube_env/bin/python}
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
-MS="$REPO/../manuscript"
+MS="$REPO/manuscript"
 STATE="$DATA/state"; LOGS="$DATA/logs"
 mkdir -p "$STATE" "$LOGS"
 MAX_TRIES=30

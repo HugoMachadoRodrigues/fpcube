@@ -4,3 +4,13 @@ __pycache__/
 *.parquet
 *.tif
 *.zarr/
+# LaTeX build output (manuscript/)
+manuscript/*.aux
+manuscript/*.log
+manuscript/*.fls
+manuscript/*.fdb_latexmk
+manuscript/*.blg
+manuscript/*.bbl
+manuscript/*.out
+manuscript/*.synctex.gz
+manuscript/fpcube_essd.pdf

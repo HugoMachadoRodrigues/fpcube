@@ -12,7 +12,7 @@ import pandas as pd
 
 from fpcube import config
 
-MS = Path(__file__).resolve().parents[2] / "manuscript"
+MS = Path(__file__).resolve().parents[1] / "manuscript"
 TBD = r"\textbf{[TBD]}"
 
 
