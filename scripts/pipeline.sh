@@ -24,7 +24,7 @@ CHECK_EVERY=120
 STEPS=(
   "prism|$PY -m fpcube.sources.prism|3"
   "radar|env FPCUBE_S1_WORKERS=4 FPCUBE_S1_BLOCK_THREADS=8 $PY -m fpcube.sources.radar|2"
-  "optical|env FPCUBE_THREADS=24 $PY -m fpcube.sources.optical|3"
+  "optical|env FPCUBE_HLS_WORKERS=12 $PY -m fpcube.sources.optical|3"
   "terrain|$PY -m fpcube.sources.static terrain|16"
   "soil|$PY -m fpcube.sources.static soil|3"
   "wetlands|$PY -m fpcube.sources.static wetlands|3"

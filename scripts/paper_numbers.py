@@ -48,7 +48,8 @@ def numbers(rel):
     val = rel / "validation" / "summary.json" if rel else None
     if val and val.exists():
         v = json.loads(val.read_text())
-        for k in ("ValidationSummary", "ValidationFields", "ValidationCoverage", "ValidationPhysical"):
+        for k in ("ValidationSummary", "ValidationFields", "ValidationCoverage", "ValidationPhysical",
+                  "ValidationQuality"):
             n[k] = v.get(k, TBD)
     b = rel / "benchmark" if rel else None
     if b and (b / "task1_results.csv").exists():

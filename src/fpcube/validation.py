@@ -15,6 +15,7 @@ import sys
 import geopandas as gpd
 import numpy as np
 import pandas as pd
+import rasterio
 
 from fpcube import config
 
@@ -174,6 +175,51 @@ def physical(cube, fields):
     return out, txt
 
 
+def quality(rel, cube, fields):
+    """Known limits of the dynamic layers, stated with their size: interpolation, unobserved fields, radar orbit
+    mixing, saturated NDVI, provisional PRISM."""
+    from fpcube.cube import period_index
+    nd, gf, no = cube.ndvi.values, cube.gap_filled.values, cube.n_optical_obs.values
+    obs = no > 0
+    r = pd.concat(pd.read_parquet(p, columns=["fid", "date", "relative_orbit", "orbit_state"])
+                  for p in (rel / "radar_observations").glob("*.parquet"))
+    r["k"] = period_index(pd.to_datetime(r.date))
+    g = r.groupby(["fid", "k"])
+    p_ = sorted((config.RAW / "prism" / "ppt").glob("prism_ppt_*.tif"))[-1]
+    with rasterio.open(p_) as s_:
+        got = s_.tags().get("retrieved")
+    got = pd.Timestamp(got) if got else pd.Timestamp(p_.stat().st_mtime, unit="s").normalize()
+    stats = {"interpolated_frac": float(gf.sum() / np.isfinite(nd).sum()),
+             "n_no_observations": int(fields.flag_no_observations.sum()),
+             "n_no_optical": int(fields.flag_no_optical.sum()),
+             "radar_mixed_orbit_frac": float((g.relative_orbit.nunique() > 1).mean()),
+             "radar_mixed_direction_frac": float((g.orbit_state.nunique() > 1).mean()),
+             "ndvi_saturated_frac": float((obs & (np.abs(nd) >= 0.999)).sum() / obs.sum()),
+             "prism_retrieved": str(got.date()),
+             "prism_provisional_from": str((got - pd.DateOffset(months=6)).date())}
+    sat = 100 * stats["ndvi_saturated_frac"]
+    txt = ("{gf:.0f}\\,\\% of the optical values in the cube are interpolated rather than observed (flag "
+           "\\texttt{{gap\\_filled}}). {nn} fields have no optical or radar observation at all and {nr} more have radar only; "
+           "they are narrow fields in which no pixel remains after the inward buffers, kept in the release and flagged "
+           "(\\texttt{{flag\\_no\\_observations}}, \\texttt{{flag\\_no\\_optical}}). {mo:.1f}\\,\\% of the radar composites "
+           "combine acquisitions from more than one relative orbit ({md:.1f}\\,\\% mix ascending and descending passes), so "
+           "the incidence angle varies within these periods; the per-acquisition table keeps the orbit of every value. "
+           "Because indices are computed per pixel and limited to $[-1, 1]$, NDVI composites reach $\\pm 1$ in "
+           "{sat} of the observed cells. PRISM daily values become stable about six months after the date; the record "
+           "was retrieved on {got}, so values after {prov} are provisional and may be revised in later PRISM releases.").format(
+        gf=100 * stats["interpolated_frac"], nn=fmt_int(stats["n_no_observations"]),
+        nr=fmt_int(stats["n_no_optical"] - stats["n_no_observations"]),
+        mo=100 * stats["radar_mixed_orbit_frac"], md=100 * stats["radar_mixed_direction_frac"],
+        sat=(f"{sat:.3f}\\,\\%" if sat >= 0.001 else "fewer than 0.001\\,\\%"),
+        got=pd.Timestamp(stats["prism_retrieved"]).strftime("%-d %B %Y"),
+        prov=pd.Timestamp(stats["prism_provisional_from"]).strftime("%-d %B %Y"))
+    return stats, txt
+
+
+def fmt_int(x):
+    return f"{x:,}".replace(",", "\\,")
+
+
 def main(version="v1.0"):
     import xarray as xr
     rel = config.RELEASE / version
@@ -188,8 +234,10 @@ def main(version="v1.0"):
     cstats, ctxt, py, ry = coverage(rel, cube, fields)
     pd.DataFrame({"optical_clear_per_field": py, "radar_per_field": ry}).to_csv(vdir / "coverage_by_year.csv")
     pstats, ptxt = physical(cube, fields)
-    summary = {"stats": {"delineation": dstats, "coverage": cstats, "physical": pstats},
+    qstats, qtxt = quality(rel, cube, fields)
+    summary = {"stats": {"delineation": dstats, "coverage": cstats, "physical": pstats, "quality": qstats},
                "ValidationFields": dtxt, "ValidationCoverage": ctxt, "ValidationPhysical": ptxt,
+               "ValidationQuality": qtxt,
                "ValidationSummary": ("that {g:.0f}\\,\\% of the field area is grassland or cropland in the independent "
                                      "ESA WorldCover map, that a median field has {c:.0f} clear optical observations "
                                      "per year, and that NDVI and backscatter respond to rainfall, drought and flooding "

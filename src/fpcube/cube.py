@@ -298,6 +298,12 @@ def build(version="v1.0"):
             nrad[sl] = n
         print(f"cube fields {k0 + CHUNK}/{len(fids)}", flush=True)
     wx = weather_composites(fields, times)
+    # observation coverage per field: narrow fields can have no pixel left after the inward buffers
+    n_opt_p, n_rad_p = (nobs > 0).sum(1), (nrad > 0).sum(1)
+    fields["n_optical_periods"] = n_opt_p.astype(np.int16)
+    fields["n_radar_periods"] = n_rad_p.astype(np.int16)
+    fields["flag_no_optical"] = n_opt_p == 0
+    fields["flag_no_observations"] = (n_opt_p == 0) & (n_rad_p == 0)
 
     ids = fields.field_id.to_numpy().astype(str)          # fixed-width text: readable by any Zarr v2 reader
     ds = xr.Dataset(coords={"field": ids, "time": times})

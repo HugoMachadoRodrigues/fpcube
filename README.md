@@ -45,6 +45,10 @@ fpcube cube && fpcube benchmark && fpcube release
 Data go to `$FPCUBE_DATA` (default `data/` in this folder). HLS before 2020 is read from NASA LP DAAC and needs an Earthdata
 login in `~/.netrc`; everything else is public (Microsoft Planetary Computer, PRISM, CropScape, FDACS, USDM, NHC).
 
+Before submission, refresh the provisional PRISM months (values become stable about six months after the date):
+delete `data/raw/prism/*/prism_*_2026.tif` (and 2025 if it ends within six months), then run `fpcube prism`, `fpcube cube`
+and `python -m fpcube.validation`; the validation text states the retrieval date and the provisional window.
+
 ## Benchmark
 
 | Task | Input | Target | Split |

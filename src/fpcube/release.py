@@ -98,6 +98,8 @@ Following Gebru et al. (2021), *Datasheets for datasets*.
   2022-2024 after the Sentinel-1B failure. `water_table_min_cm` is empty where gNATSGO records no water table in
   the soil profile (mostly excessively and well-drained soils): read it as deeper than about 2 m, not as unknown.
   `twi_mean` uses tan(slope) >= 0.001, so flat fields have a value.
+  NASS pasture condition is absent for weeks NASS did not publish (shutdowns of Dec 2018-Jan 2019 and
+  Oct-Nov 2025; Dec 2025-Mar 2026). Landfalls of 2026 storms are derived from working best tracks (preliminary).
 - **Sensitive data.** None. Parcel owner names were never downloaded.
 
 ## Collection and preprocessing

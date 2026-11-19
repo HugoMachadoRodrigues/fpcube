@@ -60,7 +60,8 @@ def year(var, y):
                        width=arr.shape[2], dtype="float32", crs=crs, transform=tr, nodata=np.nan,
                        compress="deflate", predictor=3) as dst:
         dst.write(arr)
-        dst.update_tags(dates=json.dumps([str(d.date()) for d in days]), variable=var, source=URL)
+        dst.update_tags(dates=json.dumps([str(d.date()) for d in days]), variable=var, source=URL,
+                        retrieved=str(pd.Timestamp.now().date()))   # values < ~6 months old are provisional
     out.with_suffix(".tmp.tif").rename(out)
     print(var, y, arr.shape, flush=True)
     return out

@@ -4,7 +4,9 @@
 - USDA NASS Crop Progress, weekly Florida pasture condition (percent very poor ... excellent), 2016-2026.
   Needs a free Quick Stats API key in the environment variable FPCUBE_NASS_KEY.
 - Hurricanes: NOAA HURDAT2 Atlantic best tracks (through 2025) plus NHC working best tracks (b-decks) for
-  2026 storms that are not yet in HURDAT2. Track points within 300 km of Florida are kept.
+  2026 storms that are not yet in HURDAT2. Whole tracks of storms with a point within ~300 km of Florida are kept.
+  Landfalls are the HURDAT2 'L' records (all landfalls of those storms, in Florida or elsewhere); for b-deck storms,
+  which have none, Florida landfalls are derived from the track crossing the shoreline.
 """
 import io
 import os
@@ -117,6 +119,36 @@ def _btk_year(year):
     return d
 
 
+def florida_land():
+    """Florida land as one polygon (Census cartographic county boundaries, clipped to the shoreline), EPSG:4326."""
+    import geopandas as gpd
+    return gpd.read_parquet(config.RAW / "boundaries" / "fl_counties.parquet").to_crs(4326).union_all()
+
+
+def derive_landfalls(h, land, step="10min"):
+    """Landfalls on `land` from a track: positions, wind and pressure interpolated linearly in time at `step`;
+    every sea-to-land crossing is one landfall, with the status of the nearest track point. Used for storms
+    whose working best track (b-deck) carries no landfall records."""
+    from shapely import contains_xy
+    out = []
+    for sid, g in h.groupby("storm_id"):
+        g = g.sort_values("time").drop_duplicates("time").set_index("time")
+        if len(g) < 2:
+            continue
+        tt = pd.date_range(g.index[0], g.index[-1], freq=step)
+        num = g[["lat", "lon", "vmax_kt", "pmin_hpa"]].reindex(g.index.union(tt)).interpolate(method="time").reindex(tt)
+        on = contains_xy(land, num.lon.to_numpy(), num.lat.to_numpy())
+        for i in np.nonzero(on[1:] & ~on[:-1])[0] + 1:
+            t = tt[i]
+            near = np.abs((g.index - t).total_seconds()).argmin()
+            out.append({"storm_id": sid, "name": g.name.iloc[0], "time": t, "record": "L",
+                        "status": g.status.iloc[near], "lat": round(float(num.lat.iloc[i]), 2),
+                        "lon": round(float(num.lon.iloc[i]), 2), "vmax_kt": round(float(num.vmax_kt.iloc[i])),
+                        "pmin_hpa": round(float(num.pmin_hpa.iloc[i])) if np.isfinite(num.pmin_hpa.iloc[i]) else np.nan,
+                        "source": g.source.iloc[0] + "; landfall derived from track crossing the shoreline"})
+    return pd.DataFrame(out)
+
+
 def hurricanes():
     h = _parse_hurdat2(requests.get(_hurdat2_url(), timeout=300).text)
     last = h.time.dt.year.max()
@@ -131,7 +163,10 @@ def hurricanes():
     OUT.mkdir(parents=True, exist_ok=True)
     h.to_parquet(OUT / "hurricane_tracks_florida.parquet", index=False)
     landfalls = h[h.record == "L"]
-    landfalls.to_parquet(OUT / "hurricane_landfalls.parquet", index=False)
+    prelim = h[h.source != "HURDAT2"]        # working best tracks have no landfall records: derive Florida ones
+    if len(prelim):
+        landfalls = pd.concat([landfalls, derive_landfalls(prelim, florida_land())], ignore_index=True)
+    landfalls.sort_values("time").to_parquet(OUT / "hurricane_landfalls.parquet", index=False)
     return h
 
 
