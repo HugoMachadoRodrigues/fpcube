@@ -13,7 +13,7 @@ authors = [{name = "Hugo Rodrigues", email = "rodrigues.h@ufl.edu"}]
 dependencies = [
   "geopandas>=1.0", "rasterio>=1.3", "rioxarray", "xarray", "zarr>=3", "pyarrow", "dask", "distributed",
   "odc-stac", "pystac-client", "planetary-computer", "exactextract", "shapely>=2", "pyogrio",
-  "requests", "tqdm", "numpy", "pandas", "scikit-learn", "lightgbm", "matplotlib",
+  "requests", "tqdm", "numpy", "pandas", "scikit-learn", "lightgbm", "matplotlib", "cmcrameri", "pillow",
   "adlfs", "torch", "pystac", "whitebox", "scipy",
 ]
 
