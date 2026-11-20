@@ -233,6 +233,94 @@ def physical(cube, fields, B=1000):
     return out, txt
 
 
+def freeze_and_condition(cube, fields, B=1000):
+    """(e) January 2018 freeze: change of observed NDVI and of VV for fields whose 5-day mean minimum temperature in
+    the period of 17 Jan 2018 was <= 2 degC against fields at >= 8 degC (median of the 3 periods after minus median of
+    the 6 before), with county-cluster intervals of the median.
+    (f) Statewide pasture condition: weekly NASS Florida pasture condition index against the statewide median
+    anomaly of observed NDVI in the 5-day period that ends in the NASS week (both raw and with the index's
+    week-of-year mean removed). Weeks are serially correlated, so r is descriptive."""
+    import warnings
+    from fpcube.benchmark.tasks import ndvi_anomaly, observed_only
+    times = pd.DatetimeIndex(cube.time.values)
+    obs = observed_only(cube[["ndvi", "mndwi", "n_optical_obs"]].copy())
+    nd, vv = obs.ndvi.values, cube.vv_db.values
+    county = pd.factorize(fields.county.to_numpy())[0]
+    rng = np.random.default_rng(11)
+    out = {}
+    k = int(np.searchsorted(times, pd.Timestamp("2018-01-17"), side="right")) - 1
+    tmin = cube.tmin_mean.values[:, k]
+    groups = {"cold": tmin <= 2, "mild": tmin >= 8}
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", RuntimeWarning)
+        d = {"dndvi": np.nanmedian(nd[:, k + 1:k + 4], 1) - np.nanmedian(nd[:, k - 6:k], 1),
+             "dvv": np.nanmedian(vv[:, k + 1:k + 4], 1) - np.nanmedian(vv[:, k - 6:k], 1)}
+    out["freeze_period"] = f"{times[k]:%d %b %Y}"
+    for g, rows in groups.items():
+        out[f"freeze_n_{g}"] = int(rows.sum())
+        for var, x in d.items():
+            sel = rows & np.isfinite(x)
+            v, cl = x[sel], pd.factorize(county[sel])[0]
+            out[f"freeze_{var}_n_{g}"] = int(sel.sum())
+            if sel.sum() < 10:
+                continue
+            q = np.percentile(v, [25, 50, 75])
+            o = np.argsort(v)
+            meds = []
+            for _ in range(B):
+                w = M_cluster_weights(cl, rng)[o]
+                cw = np.cumsum(w)
+                meds.append(v[o][np.searchsorted(cw, cw[-1] / 2)])
+            out.update({f"freeze_{var}_{g}_median": float(q[1]), f"freeze_{var}_{g}_q25": float(q[0]),
+                        f"freeze_{var}_{g}_q75": float(q[2]), f"freeze_{var}_{g}_lo": float(np.percentile(meds, 2.5)),
+                        f"freeze_{var}_{g}_hi": float(np.percentile(meds, 97.5))})
+    # (f) NASS condition
+    nass = pd.read_parquet(config.RAW / "labels" / "nass_fl_pasture_condition_weekly.parquet")
+    nass["week_ending"] = pd.to_datetime(nass.week_ending)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", RuntimeWarning)
+        state = pd.Series(np.nanmedian(ndvi_anomaly(obs), axis=0), index=times + pd.Timedelta(days=4))  # period end
+        nfield = pd.Series(np.isfinite(nd).sum(0), index=state.index)
+    state = state[nfield >= 1000].dropna()
+    j = np.searchsorted(state.index.values, nass.week_ending.values, side="right") - 1
+    ok = (j >= 0)
+    lag = np.full(len(nass), np.inf)
+    lag[ok] = (nass.week_ending.values[ok] - state.index.values[j[ok]]) / np.timedelta64(1, "D")
+    ok &= lag < 7
+    x = np.where(ok, state.values[np.clip(j, 0, None)], np.nan)
+    ci = nass.condition_index.to_numpy(float)
+    woy = nass.week_ending.dt.isocalendar().week.to_numpy()
+    ci_anom = ci - pd.Series(ci).groupby(woy).transform("mean").to_numpy()
+    sel = np.isfinite(x) & np.isfinite(ci)
+    out.update({"nass_weeks": int(sel.sum()),
+                "nass_r_raw": float(np.corrcoef(x[sel], ci[sel])[0, 1]),
+                "nass_r_anom": float(np.corrcoef(x[sel], ci_anom[sel])[0, 1]),
+                "nass_spearman_anom": float(pd.Series(x[sel]).corr(pd.Series(ci_anom[sel]), method="spearman"))})
+    by_year = {}
+    for yr in sorted(set(nass.week_ending.dt.year[sel])):
+        m = sel & (nass.week_ending.dt.year.to_numpy() == yr)
+        if m.sum() >= 15:
+            by_year[int(yr)] = float(np.corrcoef(x[m], ci_anom[m])[0, 1])
+    out["nass_r_anom_by_year"] = by_year
+    g = lambda v, c, p_: ("{:.{p}f} (IQR {:.{p}f} to {:.{p}f}; 95\\,\\% interval of the median {:.{p}f} to {:.{p}f}; "
+                          "$n={}$)").format(out[f"freeze_{v}_{c}_median"], out[f"freeze_{v}_{c}_q25"],
+                                           out[f"freeze_{v}_{c}_q75"], out[f"freeze_{v}_{c}_lo"],
+                                           out[f"freeze_{v}_{c}_hi"],
+                                           f"{out[f'freeze_{v}_n_{c}']:,}".replace(",", "\\,"), p=p_)
+    txt = ("In the 5-day period starting {per}, {nc} fields had a mean minimum temperature of 2\\,$^\\circ$C or "
+           "lower and {nm} fields one of 8\\,$^\\circ$C or higher. Over the following 15 days observed NDVI changed by "
+           "{dc} in the cold fields and by {dm} in the mild ones, and VV by {vc} and {vm}\\,dB. "
+           "Over {nw} weeks the statewide median anomaly of observed NDVI is correlated with the weekly NASS "
+           "pasture condition index ($r={rr:.2f}$) and with the index after removing its mean for the week of year "
+           "($r={ra:.2f}$; Spearman {rs:.2f}); weeks are serially correlated and the yearly values range from "
+           "{ymin:.2f} to {ymax:.2f}.").format(
+        per=out["freeze_period"], nc=f"{out['freeze_n_cold']:,}".replace(",", "\\,"),
+        nm=f"{out['freeze_n_mild']:,}".replace(",", "\\,"), dc=g("dndvi", "cold", 2), dm=g("dndvi", "mild", 2),
+        vc=g("dvv", "cold", 1), vm=g("dvv", "mild", 1), nw=out["nass_weeks"], rr=out["nass_r_raw"],
+        ra=out["nass_r_anom"], rs=out["nass_spearman_anom"], ymin=min(by_year.values()), ymax=max(by_year.values()))
+    return out, txt
+
+
 def M_cluster_weights(codes, rng):
     from fpcube.benchmark.models import _cluster_weights
     return _cluster_weights(codes, rng)
@@ -445,15 +533,16 @@ def main(version="v1.0"):
     strata = quality_by_stratum(cube, fields, counts)
     strata.to_csv(vdir / "quality_by_stratum.csv", index=False)
     pstats, ptxt = physical(cube, fields)
+    fstats, ftxt = freeze_and_condition(cube, fields)
     qstats, qtxt = quality(rel, cube, fields)
     acct = delineation_accounting(fields)
     pd.DataFrame(acct["steps"]).to_csv(vdir / "delineation_accounting.csv", index=False)
     estats = evidence(rel, fields)
     gc_all = 100 * (dstats["all"]["grassland"] + dstats["all"]["cropland"])
     summary = {"code": provenance.info(),
-               "stats": {"delineation": dstats, "coverage": cstats, "physical": pstats, "quality": qstats,
+               "stats": {"delineation": dstats, "coverage": cstats, "physical": pstats, "events": fstats, "quality": qstats,
                          "accounting": acct, "evidence": estats},
-               "ValidationFields": dtxt, "ValidationCoverage": ctxt, "ValidationPhysical": ptxt,
+               "ValidationFields": dtxt, "ValidationCoverage": ctxt, "ValidationPhysical": ptxt, "ValidationEvents": ftxt,
                "ValidationQuality": qtxt,
                "ValidationSummary": ("that {g:.0f}\\,\\% of the field area (tier~A {gA:.0f}\\,\\%, tier~B {gB:.0f}\\,\\%) "
                                      "is grassland or cropland in the independent ESA WorldCover map and that the median "

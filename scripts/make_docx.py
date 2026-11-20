@@ -1,4 +1,4 @@
-"""Word version of the ESSD manuscript, for editing before submission.
+"""Word version of the manuscript.
 
 Reads manuscript/fpcube_essd.tex (with numbers.tex, tables/*.tex and figures/*.pdf as written by paper_numbers.py and
 figures.py) and writes manuscript/fpcube_essd.docx on the Copernicus Word template, with Copernicus author-year

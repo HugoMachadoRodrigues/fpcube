@@ -1,4 +1,4 @@
-"""Figures for the ESSD paper. Each figure is skipped (with a message) if its inputs do not exist yet.
+"""Figures for the manuscript. Each figure is skipped (with a message) if its inputs do not exist yet.
 
 python scripts/figures.py [fig1 fig2 fig3 fig4 fig5] [--release v1.0]
 """
@@ -365,7 +365,7 @@ def fig4(rel):
     axs[0, 1].legend(fontsize=6.0, loc="upper left", bbox_to_anchor=(0.0, -0.22), ncol=1,
                      title="Fields with ≥ 200 mm; median and IQR", title_fontsize=6.0)
     # row 2: freeze
-    k = int(np.searchsorted(times, pd.Timestamp("2018-01-17")))
+    k = int(np.searchsorted(times, pd.Timestamp("2018-01-17"), side="right")) - 1   # period holding the freeze
     tmin = cube.tmin_mean.values[:, k]
     pos, neg = tmin <= 2, tmin >= 8
     a = cube.ndvi.values
@@ -379,7 +379,7 @@ def fig4(rel):
     sm = mpl.cm.ScalarMappable(cmap=DIV, norm=mpl.colors.Normalize(-lim, lim))
     fig.colorbar(sm, ax=ax, shrink=0.55, pad=0.01, label="ΔNDVI, 15 d after − 30 d before")
     ax.set_axis_off()
-    ax.set_title("d  Freeze, 17 Jan 2018", fontsize=8)
+    ax.set_title(f"d  Freeze, period of {times[k]:%d %b %Y}", fontsize=8)
     for c_, (var, ylab) in enumerate((("ndvi", "NDVI (observed)"), ("vv_db", "VV (dB)"))):
         ax = axs[1, 1 + c_]
         arr = cube[var].values

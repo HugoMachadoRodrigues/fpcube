@@ -48,7 +48,7 @@ def numbers(rel):
     val = rel / "validation" / "summary.json" if rel else None
     if val and val.exists():
         v = json.loads(val.read_text())
-        for k in ("ValidationSummary", "ValidationFields", "ValidationCoverage", "ValidationPhysical",
+        for k in ("ValidationSummary", "ValidationFields", "ValidationCoverage", "ValidationPhysical", "ValidationEvents",
                   "ValidationQuality"):
             n[k] = v.get(k, TBD)
     if val and val.exists():
@@ -73,6 +73,17 @@ def numbers(rel):
         n["MultipartAreaShare"] = pct(q.get("multipart_area_share", np.nan))
         n["GeomNotAssessed"] = pct(cv.get("geom_not_assessed_frac", np.nan))
         n["UsableDaysMedian"] = fmt(cv.get("usable_days_per_field_year_median"))
+        n["GeomNotAssessedUsed"] = pct(cv.get("geom_not_assessed_frac_of_used", np.nan))
+        n["CellsEmptyShare"] = pct(cv.get("cells_empty", np.nan))
+        n["CellsObservedShare"] = pct(cv.get("cells_observed", np.nan))
+        n["InterpShare"] = pct(cv.get("interpolated_share_of_ndvi_values", np.nan))
+        n["OrbitChangeShare"] = pct(q.get("radar_orbit_change_consecutive_frac", np.nan))
+        n["IanFields"] = fmt(st.get("physical", {}).get("ian_fields_200mm"))
+        for d in acc.get("steps", []):
+            if "outside any parcel" in d["step"]:
+                n["AccountOutsideKha"] = fmt(-d["area_ha"] / 1e3)
+            if "smaller than" in d["step"]:
+                n["AccountSmallKha"] = fmt(-d["area_ha"] / 1e3)
         code = json.loads(val.read_text()).get("code", {})
         n["CodeCommit"] = code.get("commit", TBD)
         n["CodeHash"] = code.get("code_sha256_16", TBD)
@@ -97,6 +108,24 @@ def numbers(rel):
         b_ = best.loc[best.skill_vs_ref.idxmax()]
         n["TaskOneSkill"] = f"{100 * b_.skill_vs_ref:.0f}\\,\\%"              # MSE skill score vs climatology
         n["TaskOneSkillModel"] = {"lightgbm": "LightGBM", "transformer": "transformer"}[b_.model]
+        n["PersistenceAge"] = fmt(r[(r.split == "test") & (r.model == "persistence")].persistence_age_days_median.median())
+    if b and (b / "task1_run_info.json").exists():
+        n["TaskOneDropped"] = fmt(json.loads((b / "task1_run_info.json").read_text()).get("n_dropped_crossing_split"))
+    ps = rel / "validation" / "photo_sample.csv" if rel else None
+    if ps and ps.exists():
+        d = pd.read_csv(ps)
+        n["PhotoSampleN"] = fmt(len(d))
+        n["PhotoSampleIn"] = fmt(int((d.set == "commission").sum()))
+        n["PhotoSampleOut"] = fmt(int((d.set == "omission").sum()))
+    if b and (b / "task1_lightgbm_importance.csv").exists():
+        imp = pd.read_csv(b / "task1_lightgbm_importance.csv", index_col=0).iloc[:, 0]
+        fam = {"NDVI": "^ndvi", "day of year": "^doy", "temperature": "^tm", "VPD": "vpd", "EVI and NDMI": "^(evi|ndmi)",
+               "radar": "^v[vh]", "rainfall": "^ppt", "soil and terrain": "drainage|hand|twi|aws|soc|slope|elev|wt|hsg|flood|wetl",
+               "observation counts and age": "^n_|_age"}
+        sh = {k: imp[imp.index.str.contains(v)].sum() / imp.sum() for k, v in fam.items()}
+        n["TaskOneImportance"] = ("Grouped by input family, the share of LightGBM split gain is " + ", ".join(
+            f"{k} {100 * v:.0f}\\,\\%" for k, v in sorted(sh.items(), key=lambda kv: -kv[1])) +
+            f", and the most important single input is {imp.index[0].replace('_', '\\_')}")
     if b and (b / "benchmark_text.json").exists():
         n.update(json.loads((b / "benchmark_text.json").read_text()))
     dois = MS.parent / "zenodo" / "dois.json"           # {"DataDOI": "https://doi.org/...", "CodeDOI": "..."}
@@ -229,6 +258,16 @@ def tables(rel):
             t.append(f" & County-weeks per class & & & & {int(x.n_none)} & {int(x.n_d0)} & {int(x.n_d1)} & "
                      f"{int(x.n_d2plus)}\\\\")
             t.append("\\middlehline" if split == "test" else "")
+        if (r.split == "test_change").any():
+            t.append("\\middlehline")
+            for i, (m, nm) in enumerate(names.items()):
+                x = r[(r.split == "test_change") & (r.model == m)].iloc[0]
+                t.append(f"{'Temporal, class changed' if i == 0 else ''} & {nm} & {x.qwk:.2f} [{x.qwk_lo:.2f}, "
+                         f"{x.qwk_hi:.2f}] & {x.macro_f1:.2f} & {x.balanced_accuracy:.2f} & "
+                         f"\\multicolumn{{4}}{{l}}{{direction of change right: {100 * x.direction_acc:.0f}\\,\\%}}\\\\")
+            x = r[(r.split == "test_change")].iloc[0]
+            t.append(f" & County-weeks per class & & & & {int(x.n_none)} & {int(x.n_d0)} & {int(x.n_d1)} & "
+                     f"{int(x.n_d2plus)}\\\\")
         t += ["\\bottomhline", "\\end{tabular}"]
         (MS / "tables" / "bench3.tex").write_text("\n".join(x for x in t if x) + "\n")
 

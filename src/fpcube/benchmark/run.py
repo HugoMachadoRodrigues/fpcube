@@ -165,7 +165,7 @@ def task3(cube, fields):
     with warnings.catch_warnings():
         warnings.simplefilter("ignore", RuntimeWarning)
         agg = np.stack([np.r_[np.nanmean(b, 0), np.nanpercentile(b, [10, 50, 90], 0).ravel()] for b in bags])
-    rows, cms = [], {}
+    rows, cms, pred_rows = [], {}, []
     sp = u.split.to_numpy()
     tr, va = sp == "train", sp == "val"
     ytr = u.y[tr].to_numpy()
@@ -186,17 +186,26 @@ def task3(cube, fields):
                  "rule_anomaly_cuts": rule(m[te]), "lightgbm_bag_stats": gbm.predict(agg[te]).argmax(1),
                  "attention_mil": M.predict_mil(mil, [bags[i] for i in np.nonzero(te)[0]]).astype(int)}
         cl1, cl2 = u.county_fips.to_numpy()[te], month[te]
+        change = y != u.y_prev[te].to_numpy().astype(int)     # county-weeks whose USDM class differs from last week
         for k, p in preds.items():
             p = np.clip(p, 0, 3)
-            r = M.ordinal_metrics(y, p)
-            for stat in ("qwk", "macro_f1"):
-                lo, hi = M.pigeonhole_bootstrap(lambda w: M.ordinal_metrics(y, p, w)[stat], cl1, cl2, B=300)
-                r[f"{stat}_lo"], r[f"{stat}_hi"] = lo, hi
-            rows.append({"task": 3, "split": name, "model": k, **r})
+            preds[k] = p
+            for sub, keep in ((name, slice(None)), (f"{name}_change", change)):
+                ys, ps, c1, c2 = y[keep], p[keep], cl1[keep], cl2[keep]
+                r = M.ordinal_metrics(ys, ps)
+                for stat in ("qwk", "macro_f1"):
+                    lo, hi = M.pigeonhole_bootstrap(lambda w: M.ordinal_metrics(ys, ps, w)[stat], c1, c2, B=300)
+                    r[f"{stat}_lo"], r[f"{stat}_hi"] = lo, hi
+                prev = u.y_prev[te].to_numpy().astype(int)[keep]   # share with the right direction of change
+                r["direction_acc"] = float(np.mean(np.sign(ps - prev) == np.sign(ys - prev)))
+                rows.append({"task": 3, "split": sub, "model": k, **r})
             if name == "test":
                 from sklearn.metrics import confusion_matrix
                 cms[k] = pd.DataFrame(confusion_matrix(y, p, labels=[0, 1, 2, 3]),
                                       index=["none", "D0", "D1", "D2+"], columns=["none", "D0", "D1", "D2+"])
+        pred_rows.append(pd.DataFrame({"county_fips": u.county_fips.to_numpy()[te], "valid_start": u.valid_start.to_numpy()[te],
+                                       "split": name, "y": y, **{f"pred_{k}": v for k, v in preds.items()}}))
+    u.attrs["predictions"] = pd.concat(pred_rows, ignore_index=True)
     return pd.DataFrame(rows), u, cms
 
 
@@ -225,6 +234,7 @@ def run_task(name, release, max_train):
         for k, cm in cms.items():
             cm.to_csv(out / f"task3_confusion_{k}.csv")
         (out / "task3_confusion.csv").unlink(missing_ok=True)
+        u.attrs.pop("predictions").to_parquet(out / "task3_predictions.parquet", index=False)
         u[["county_fips", "valid_start", "y", "y_prev", "split"]].to_parquet(out / "task3_samples.parquet",
                                                                             index=False)
     info["finished"] = time.strftime("%Y-%m-%d %H:%M:%S")
@@ -304,6 +314,19 @@ def paper_text(out):
                 rulef=f"{x('rule_anomaly_cuts', 'macro_f1'):.2f}", lastf=f"{x('usdm_last_week', 'macro_f1'):.2f}",
                 majf=f"{x('majority_class', 'macro_f1'):.2f}", r3=100 * x("attention_mil", "recall_d2plus"),
                 n3=int(x("attention_mil", "n_d2plus")), r0=100 * x("attention_mil", "recall_none")))
+        if ("test_change", "attention_mil") in r.index:
+            xc = lambda m, c: r.loc[("test_change", m), c]
+            cc = lambda m: "{:.2f} [{:.2f}, {:.2f}]".format(xc(m, "qwk"), xc(m, "qwk_lo"), xc(m, "qwk_hi"))
+            t["TaskThreeChange"] = (
+                "In the {n} test county-weeks whose USDM class differs from the previous week, the quadratic weighted "
+                "kappa is {last} for last week's class, {rule} for the NDVI-anomaly cut points, {gbm} for LightGBM and "
+                "{mil} for attention MIL, and the direction of the change (worse or better than last week) is right in "
+                "{dr:.0f}\\,\\%, {dg:.0f}\\,\\% and {dm:.0f}\\,\\% of these weeks for the last three, against "
+                "{dj:.0f}\\,\\% for the majority class.").format(dj=100 * xc("majority_class", "direction_acc"),
+                n=f"{int(xc('attention_mil', 'n')):,}".replace(",", "\\,"), last=cc("usdm_last_week"),
+                rule=cc("rule_anomaly_cuts"), gbm=cc("lightgbm_bag_stats"), mil=cc("attention_mil"),
+                dr=100 * xc("rule_anomaly_cuts", "direction_acc"), dg=100 * xc("lightgbm_bag_stats", "direction_acc"),
+                dm=100 * xc("attention_mil", "direction_acc"))
     t["BenchmarkResults"] = " ".join(parts) + " Figure~\\ref{fig:benchmark} summarises the results."
     (out / "benchmark_text.json").write_text(json.dumps(t, indent=2))
     return t
