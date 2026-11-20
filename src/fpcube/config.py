@@ -41,3 +41,13 @@ PARCEL_SERVICE = ("https://gis.fdacs.gov/mapping/rest/services/"
 PARCEL_FIELDS = "CO_NO,PARCEL_ID,DOR_UC,AgTaxExempt"   # owner names are never downloaded
 
 FLORIDA_FIPS = "12"
+
+# regions used to summarise fields (Table of fields by region, validation sample strata)
+_R = {"Northwest": "Bay Calhoun Escambia Franklin Gadsden Gulf Holmes Jackson Jefferson Leon Liberty Madison Okaloosa "
+                   "Santa_Rosa Taylor Wakulla Walton Washington",
+      "Northeast": "Alachua Baker Bradford Clay Columbia Dixie Duval Flagler Gilchrist Hamilton Lafayette Levy Marion "
+                   "Nassau Putnam St._Johns Suwannee Union",
+      "Central": "Brevard Citrus Hernando Lake Orange Osceola Pasco Pinellas Polk Seminole Sumter Volusia Hillsborough",
+      "South": "Broward Charlotte Collier DeSoto Glades Hardee Hendry Highlands Indian_River Lee Manatee Martin "
+               "Miami-Dade Monroe Okeechobee Palm_Beach Sarasota St._Lucie"}
+REGION = {c.replace("_", " "): r for r, cs in _R.items() for c in cs.split()}

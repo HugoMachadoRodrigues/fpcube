@@ -12,8 +12,8 @@ Everything for the project lives in this folder (OneDrive-Personal/Packages/FPCu
 | Path | What | In git |
 |---|---|---|
 | `src/fpcube/` | pipeline package (sources, fields, cube, validation, benchmark, release) | yes |
-| `scripts/` | `pipeline.sh` (unattended build), `paper_numbers.py`, `figures.py`; `audit/` holds the cube and static-table audits | yes |
-| `manuscript/` | ESSD data paper (`fpcube_essd.tex`); numbers, tables and figures are generated, never typed | yes |
+| `scripts/` | `pipeline.sh` (unattended build), `figures.py`, `validation_sample.py`; `audit/` holds the cube and static-table audits | yes |
+| `manuscript/` | Manuscript in Word (`fpcube_manuscript.docx`) and the figures written by `scripts/figures.py`; the numbers it quotes are in `validation/summary.json` and `benchmark/` of the release | yes |
 | `tests/`, `notebooks/`, `config/` | tests and examples | yes |
 | `data/` | raw downloads, interim tables, `release/v1.0`, logs and pipeline state (~30 GB) | no |
 | `docs/` | proposal documents (AIIRI RFP, Track 2 proposal and concept) | no |
@@ -92,11 +92,10 @@ resampling events in Task 2.
 2. `python -m fpcube.release v1.0 --deposit` writes `data/deposit/v1.0`: the files to upload (one zip per directory,
    stored, plus `DEPOSIT_SHA256SUMS`). It can be deleted after the upload.
 3. Data record: new Zenodo upload with the metadata in `zenodo/dataset_v1.0.json` (title, description, licence,
-   keywords, notes with the Copernicus attribution); upload every file of `data/deposit/v1.0`.
+   keywords, notes with the Copernicus Sentinel data attribution); upload every file of `data/deposit/v1.0`.
 4. Code record: make this repository public, switch it on at zenodo.org/account/settings/github, and publish a GitHub
    release (tag `v1.0.0`); Zenodo archives it with `.zenodo.json` and `CITATION.cff`.
-5. Write both DOIs to `zenodo/dois.json` (`{"DataDOI": "https://doi.org/...", "CodeDOI": "https://doi.org/..."}`) and
-   rerun `scripts/paper_numbers.py`; if the Word manuscript has already been edited by hand, paste them there too.
+5. Write both DOIs into the manuscript (`manuscript/fpcube_manuscript.docx`).
 
 ## Licence
 

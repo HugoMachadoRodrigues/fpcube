@@ -27,8 +27,7 @@ import rasterio
 
 from fpcube import config
 
-sys.path.insert(0, str(Path(__file__).parent))
-from paper_numbers import REGION  # noqa: E402
+REGION = config.REGION
 
 SEED = 20261120
 N_PER_STRATUM = 10

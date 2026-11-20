@@ -244,7 +244,7 @@ def run_task(name, release, max_train):
 
 
 def paper_text(out):
-    """Descriptive sentences with the benchmark numbers (benchmark_text.json, read by scripts/paper_numbers.py).
+    """Descriptive sentences with the benchmark numbers (benchmark_text.json, ready to be copied into the manuscript).
     They state results only; interpretation is left to the authors."""
     t = {}
     parts = []

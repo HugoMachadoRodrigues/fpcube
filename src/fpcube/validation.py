@@ -1,5 +1,5 @@
 """Technical validation of the Florida Pasture Cube. Writes <release>/validation/*.csv and summary.json, whose
-text snippets are inserted into the paper by scripts/paper_numbers.py.
+text snippets state the numbers in sentences ready to be copied into the manuscript.
 
 1. Delineation: land cover inside fields from ESA WorldCover 2021 (10 m, Sentinel-1/2 based, independent of CDL).
 2. Coverage: clear optical observations and radar acquisitions per field and year; share of periods with data.

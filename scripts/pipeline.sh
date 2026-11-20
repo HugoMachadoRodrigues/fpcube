@@ -6,7 +6,7 @@
 # Every extraction step is resumable, so the driver simply (re)starts any step that is not done and not running,
 # kills a step whose log has been silent for too long (hung network read) and restarts it, and gives up on a step
 # after MAX_TRIES failures. When all extraction steps are done it runs the downstream steps once, in order:
-# cube -> validation -> benchmark -> release -> paper numbers -> figures -> LaTeX.
+# cube -> validation -> benchmark -> release -> figures.
 # State: $FPCUBE_DATA/state/<step>.done | .tries ; logs: $FPCUBE_DATA/logs/<step>.log
 # Stop it with:  touch data/state/STOP
 
@@ -14,7 +14,6 @@ set -u
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
 DATA=${FPCUBE_DATA:-$REPO/data}
 PY=${FPCUBE_PY:-$HOME/fpcube_env/bin/python}
-MS="$REPO/manuscript"
 STATE="$DATA/state"; LOGS="$DATA/logs"
 mkdir -p "$STATE" "$LOGS"
 MAX_TRIES=30
@@ -60,9 +59,7 @@ downstream() {
     "validation|$PY -m fpcube.validation" \
     "benchmark|$PY -m fpcube.benchmark.run" \
     "release|$PY -m fpcube.release" \
-    "numbers|$PY $REPO/scripts/paper_numbers.py" \
-    "figures|$PY $REPO/scripts/figures.py fig1 fig2 fig3 fig4 fig5" \
-    "latex|cd '$MS' && latexmk -pdf -interaction=nonstopmode -f fpcube_essd.tex"; do
+    "figures|$PY $REPO/scripts/figures.py fig1 fig2 fig3 fig4 fig5"; do
     local name=${s%%|*} cmd=${s#*|}
     done_ "$name" && continue
     log "run $name"
