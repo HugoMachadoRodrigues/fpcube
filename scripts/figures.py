@@ -3,6 +3,7 @@
 python scripts/figures.py [fig1 fig2 fig3 fig4 fig5] [--release v1.0]
 """
 import argparse
+import os
 from pathlib import Path
 
 import geopandas as gpd
@@ -13,7 +14,7 @@ import pandas as pd
 
 from fpcube import config
 
-OUT = Path(__file__).resolve().parents[1] / "manuscript" / "figures"
+OUT = Path(os.environ.get("FPCUBE_FIG_OUT", Path(__file__).resolve().parents[1] / "manuscript" / "figures"))
 # categorical order (fixed): blue, orange, aqua, yellow, magenta, green, violet, red
 C = ["#2a78d6", "#eb6834", "#1baf7a", "#eda100", "#e87ba4", "#008300", "#6250d6", "#e34948"]
 INK, INK2, MUTED, GRID, AXIS = "#0b0b0b", "#52514e", "#898781", "#e1e0d9", "#c3c2b7"
@@ -156,7 +157,7 @@ def fig5(rel):
             pos = [kinds.index(x) + (k - 0.5) * 0.3 for x in d.kind]
             axs[1].scatter(pos, d.auroc, s=14, color=C[k], zorder=3,
                            label={"lightgbm": "LightGBM"}.get(m, "ΔNDVI–ΔMNDWI rule"))
-        axs[1].set_xticks(range(len(kinds)), kinds, rotation=20)
+        axs[1].set_xticks(range(len(kinds)), [k.replace("_", "\n") for k in kinds])
         axs[1].axhline(0.5, color=MUTED, lw=0.8, ls="--")
         axs[1].set_ylabel("AUROC (per event)")
         axs[1].legend(fontsize=6.5, ncol=2, loc="upper center", bbox_to_anchor=(0.5, -0.28))
@@ -188,6 +189,15 @@ def _hurricanes():
     return pd.read_parquet(p) if p.exists() else pd.DataFrame()
 
 
+def _connect(times, v, max_gap_days=30):
+    """Observed values joined by lines, broken only at gaps longer than max_gap_days (a single radar orbit
+    revisits every 12 days, so most consecutive 5-day periods are not both filled)."""
+    ok = np.isfinite(v)
+    t, y = times[ok], v[ok]
+    brk = np.nonzero(np.diff(t.values).astype("timedelta64[D]").astype(int) > max_gap_days)[0] + 1
+    return np.insert(t.values, brk, np.datetime64("NaT")), np.insert(y, brk, np.nan)
+
+
 def fig3(rel):
     """Two example fields: NDVI (observed vs gap-filled), VV and VH, 5-day rain, county drought class."""
     if not rel or not (rel / "cube.zarr").exists():
@@ -213,14 +223,10 @@ def fig3(rel):
         ax.plot(times[gf], nd[gf], "o", ms=2.2, mfc="white", mec=C[0], mew=0.6, label="gap-filled")
         ax.set_ylabel("NDVI")
         ax.set_title(f"{'ab'[j]}  {row.field_id}, {row.county} County, {row.area_ha:.0f} ha")
-        if j == 1:
-            ax.legend(fontsize=6.5, loc="lower right", bbox_to_anchor=(1, 1.0), ncol=2, borderaxespad=0.2)
         ax = axs[1, j]
-        ax.plot(times, c.vv_db.values, color=C[2], lw=0.9, label="VV")
-        ax.plot(times, c.vh_db.values, color=C[6], lw=0.9, label="VH")
+        ax.plot(*_connect(times, c.vv_db.values), color=C[2], lw=0.9, label="VV")
+        ax.plot(*_connect(times, c.vh_db.values), color=C[6], lw=0.9, label="VH")
         ax.set_ylabel("$\\gamma^0$ (dB)")
-        if j == 1:
-            ax.legend(fontsize=6.5, loc="lower right", bbox_to_anchor=(1, 1.0), ncol=2, borderaxespad=0.2)
         ax = axs[2, j]
         ax.bar(times, c.ppt_sum.values, width=4, color=C[0], linewidth=0)
         ax.set_ylabel("Rain (mm/5 d)")
@@ -236,10 +242,12 @@ def fig3(rel):
             ax.set_xlim(pd.Timestamp(FIG3_START), times[-1] + pd.Timedelta(days=5))
             for t in hurricane_days(hur):
                 ax.axvline(t, color=MUTED, lw=0.6, ls="--", zorder=0)
-    handles = [mpl.patches.Patch(color=c_, label=l_) for c_, l_ in
-               zip(["#f0efec", "#fab219", "#ec835a", "#d03b3b"], ["None", "D0", "D1", "D2+"])]
-    fig.legend(handles=handles, loc="lower center", ncol=4, fontsize=7, title="County drought (USDM, >= 50 % area)",
-               title_fontsize=7, bbox_to_anchor=(0.5, -0.04))
+    series = axs[0, 0].get_legend_handles_labels()[0] + axs[1, 0].get_legend_handles_labels()[0]
+    handles = series + [mpl.patches.Patch(color=c_, label=l_) for c_, l_ in
+                        zip(["#f0efec", "#fab219", "#ec835a", "#d03b3b"], ["None", "D0", "D1", "D2+"])]
+    fig.legend(handles=handles, loc="lower center", ncol=4, fontsize=7,
+               title="NDVI and backscatter; county drought (USDM, >= 50 % area)", title_fontsize=7,
+               bbox_to_anchor=(0.5, -0.08))
     fig.tight_layout()
     save(fig, "fig3_examples")
 

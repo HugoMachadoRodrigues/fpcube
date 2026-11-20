@@ -253,10 +253,15 @@ def drought_class(row):
     return 0
 
 
+def drought_classes(u):
+    """Vectorised drought_class for a USDM table."""
+    return np.select([u.D2 >= 50, u.D1 >= 50, u.D0 >= 50], [3, 2, 1], 0)
+
+
 def task3_samples(usdm, fields, cube):
     times = pd.DatetimeIndex(cube.time.values)
     u = usdm.copy()
-    u["y"] = u.apply(drought_class, axis=1)
+    u["y"] = drought_classes(u)
     u["t"] = np.searchsorted(times, u.valid_start)
     u = u[(u.t >= 6) & (u.t < len(times))]
     have = set(fields.county_fips) if "county_fips" in fields else set()

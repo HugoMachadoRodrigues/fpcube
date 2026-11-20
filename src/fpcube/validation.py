@@ -216,6 +216,70 @@ def quality(rel, cube, fields):
     return stats, txt
 
 
+NEIGHBOUR_DAYS = 16      # window for comparing a screened record with the field's used records
+
+
+def evidence(rel, fields, n_fields=1500, seed=11):
+    """Numbers quoted in the methods, measured on the release: (1) NDVI of records rejected by the reflectance-range
+    and haze screens against the same field's used records within NEIGHBOUR_DAYS, on a random sample of fields
+    holding such records; (2) missing water-table depth by drainage class; (3) accuracy of the landfall rule used
+    for working best tracks, applied to six-hourly HURDAT2 points and compared with the official landfalls."""
+    import pyarrow.dataset as pads
+    from fpcube.sources import labels as Lb
+    out = {}
+    ds = pads.dataset(str(rel / "optical_observations"))
+    q = ds.to_table(columns=["fid", "qa_clear", "qa_geometry", "qa_range", "qa_haze"]).to_pandas()
+    base = q.qa_clear & q.qa_geometry
+    rng = np.random.default_rng(seed)
+    cats = {"range": base & ~q.qa_range, "haze": base & q.qa_range & ~q.qa_haze}
+    pick = np.unique(np.concatenate([rng.choice(np.unique(q.fid[m]), min(n_fields, int(np.unique(q.fid[m]).size)),
+                                                replace=False) for m in cats.values()]))
+    del q
+    d = ds.to_table(filter=pads.field("fid").isin(pick.tolist()),
+                    columns=["fid", "date", "ndvi", "qa_clear", "qa_geometry", "qa_range", "qa_haze", "qa_use"]).to_pandas()
+    d["date"] = pd.to_datetime(d.date)
+    d["cat"] = np.select([d.qa_clear & d.qa_geometry & ~d.qa_range, d.qa_clear & d.qa_geometry & d.qa_range & ~d.qa_haze],
+                         ["range", "haze"], "")
+    win = np.timedelta64(NEIGHBOUR_DAYS, "D")
+    diffs = {"range": [], "haze": []}
+    for _, g in d.groupby("fid"):
+        used = g[g.qa_use].sort_values("date")
+        ut, un = used.date.to_numpy(), used.ndvi.to_numpy()
+        for r in g[g.cat != ""].itertuples():
+            lo, hi = np.searchsorted(ut, r.date - win), np.searchsorted(ut, r.date + win, side="right")
+            if hi - lo >= 2:
+                diffs[r.cat].append(r.ndvi - np.median(un[lo:hi]))
+    for k, v in diffs.items():
+        v = np.asarray(v)
+        out[f"{k}_n"] = int(v.size)
+        out[f"{k}_ndvi_diff_median"] = float(np.median(v))
+        out[f"{k}_share_drop_gt_0.2"] = float(np.mean(v < -0.2))
+    wt = fields.water_table_min_cm.isna()
+    by = wt.groupby(fields.drainage_class).mean()
+    out["wt_missing_all"] = float(wt.mean())
+    out["wt_missing_excessively"] = float(by.get("Excessively drained", np.nan))
+    out["wt_missing_well"] = float(by.get("Well drained", np.nan))
+    out["wt_missing_poorly_max"] = float(by.reindex(["Somewhat poorly drained", "Poorly drained",
+                                                     "Very poorly drained"]).max())
+    t = pd.read_parquet(rel / "labels" / "hurricane_tracks_florida.parquet")
+    lf = pd.read_parquet(rel / "labels" / "hurricane_landfalls.parquet")
+    box = lambda x: x.lon.between(-87.7, -79.9) & x.lat.between(24.4, 31.1)
+    off = lf[(lf.source == "HURDAT2") & box(lf)]
+    syn = t[(t.source == "HURDAT2") & (t.time.dt.minute == 0) & (t.time.dt.hour % 6 == 0) & (t.record != "L")]
+    der = Lb.derive_landfalls(syn[syn.storm_id.isin(off.storm_id)], Lb.florida_land())
+    dt, km = [], []
+    for r in off.itertuples():
+        x = der[der.storm_id == r.storm_id]
+        if len(x):
+            j = (x.time - r.time).abs().idxmin()
+            dt.append(abs((x.time[j] - r.time).total_seconds()) / 60)
+            km.append(111.2 * np.hypot(x.lat[j] - r.lat, (x.lon[j] - r.lon) * np.cos(np.radians(r.lat))))
+    out["landfall_n"] = int(len(off))
+    out["landfall_dt_min_median"] = float(np.median(dt))
+    out["landfall_km_median"] = float(np.median(km))
+    return out
+
+
 def fmt_int(x):
     return f"{x:,}".replace(",", "\\,")
 
@@ -235,7 +299,9 @@ def main(version="v1.0"):
     pd.DataFrame({"optical_clear_per_field": py, "radar_per_field": ry}).to_csv(vdir / "coverage_by_year.csv")
     pstats, ptxt = physical(cube, fields)
     qstats, qtxt = quality(rel, cube, fields)
-    summary = {"stats": {"delineation": dstats, "coverage": cstats, "physical": pstats, "quality": qstats},
+    estats = evidence(rel, fields)
+    summary = {"stats": {"delineation": dstats, "coverage": cstats, "physical": pstats, "quality": qstats,
+                         "evidence": estats},
                "ValidationFields": dtxt, "ValidationCoverage": ctxt, "ValidationPhysical": ptxt,
                "ValidationQuality": qtxt,
                "ValidationSummary": ("that {g:.0f}\\,\\% of the field area is grassland or cropland in the independent "

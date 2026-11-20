@@ -5,8 +5,9 @@ Calendar: 5-day periods starting config.COMPOSITE_ANCHOR (period k covers [ancho
 Optical composite (per field and period): observations are used (flag 'qa_use') when they have at least
 max(3 px, 30% of the field's pixels) clear ('qa_clear'), a geometric shift within 1 pixel ('qa_geometry'), all six
 field-mean reflectances within [-0.01, 1] ('qa_range'; outside it are missed clouds above 1 and over-corrected
-atmosphere below -0.01, whose NDVI sits ~0.27 above the field's neighbouring dates), and field-mean blue reflectance
-at most 0.25 ('qa_haze'; above it NDVI drops ~0.45 below neighbouring dates, residual haze or thin cloud). Used
+atmosphere below -0.01, whose NDVI sits well above the field's neighbouring dates), and field-mean blue reflectance
+at most 0.25 ('qa_haze'; above it NDVI mostly drops below neighbouring dates: residual haze or thin cloud); the
+validation measures both effects (stats 'evidence' in validation/summary.json). Used
 observations are combined by the median across observations of a period; when a field falls in two overlapping MGRS
 tiles on the same date the records are first merged weighted by clear pixels. All observations stay in the long
 table with their flags.

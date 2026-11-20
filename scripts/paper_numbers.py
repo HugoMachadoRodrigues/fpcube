@@ -51,6 +51,25 @@ def numbers(rel):
         for k in ("ValidationSummary", "ValidationFields", "ValidationCoverage", "ValidationPhysical",
                   "ValidationQuality"):
             n[k] = v.get(k, TBD)
+    if val and val.exists():
+        e = json.loads(val.read_text())["stats"].get("evidence", {})
+        pct = lambda x: (f"{100 * x:.{0 if 100 * x >= 1 else 1}f}\\,\\%" if x is not None and np.isfinite(x) else TBD)
+        n["ScreenRangeNdviHigh"] = fmt(e.get("range_ndvi_diff_median", np.nan), 2)
+        n["ScreenHazeNdviLow"] = fmt(-e.get("haze_ndvi_diff_median", np.nan), 2)
+        n["ScreenHazeShareDrop"] = pct(e.get("haze_share_drop_gt_0.2", np.nan))
+        n["WtMissingAll"] = pct(e.get("wt_missing_all", np.nan))
+        n["WtMissingExcessive"] = pct(e.get("wt_missing_excessively", np.nan))
+        n["WtMissingWell"] = pct(e.get("wt_missing_well", np.nan))
+        n["WtMissingPoorlyMax"] = pct(e.get("wt_missing_poorly_max", np.nan))
+        n["LandfallKm"] = fmt(e.get("landfall_km_median", np.nan))
+        n["LandfallMin"] = fmt(e.get("landfall_dt_min_median", np.nan))
+    from fpcube import cube as C
+    from fpcube.sources import static as ST
+    from fpcube.validation import NEIGHBOUR_DAYS
+    n["ReflMin"], n["ReflMax"] = f"{C.REFL_RANGE[0]:g}", f"{C.REFL_RANGE[1]:g}"
+    n["MaxBlue"] = f"{C.MAX_BLUE:g}"
+    n["MinTanSlope"] = f"{ST.MIN_TAN_SLOPE:g}"
+    n["NeighbourDays"] = str(NEIGHBOUR_DAYS)
     b = rel / "benchmark" if rel else None
     if b and (b / "task1_results.csv").exists():
         r = pd.read_csv(b / "task1_results.csv")
@@ -59,7 +78,7 @@ def numbers(rel):
     if b and (b / "benchmark_text.json").exists():
         n.update(json.loads((b / "benchmark_text.json").read_text()))
     n.setdefault("DataDOI", "https://doi.org/10.5281/zenodo.TBD")
-    n.setdefault("CodeURL", "https://github.com/TBD/fpcube")
+    n.setdefault("CodeURL", "https://github.com/HugoMachadoRodrigues/fpcube")
     n.setdefault("CodeDOI", "https://doi.org/10.5281/zenodo.TBD")
     for k in ("NFields", "AreaKha", "AreaMha", "PersistentKha", "WoodyRemovedKha", "NFieldsTierA", "NFieldsTierB",
               "AreaTierAKha", "AreaTierBKha", "NOptObs", "NRadObs", "ValidationSummary", "ValidationFields",
@@ -109,8 +128,9 @@ def tables(rel):
     else:
         (MS / "tables" / "fields.tex").write_text(TBD + "\n")
 
+    zarr_fmt = "Zarr v3" if rel and (rel / "cube.zarr" / "zarr.json").exists() else "Zarr v2"   # read from the store
     files = [("fields.parquet", "GeoParquet", "one row per field: geometry (EPSG:5070), static attributes, flags"),
-             ("cube.zarr", "Zarr v3", "field $\\times$ time composites, observation counts, gap flag"),
+             ("cube.zarr", zarr_fmt, "field $\\times$ time composites, observation counts, gap flag"),
              ("optical\\_observations/YYYY.parquet", "Parquet", "one row per field and HLS granule with quality fields"),
              ("radar\\_observations/YYYY.parquet", "Parquet", "one row per field and Sentinel-1 acquisition"),
              ("labels/*.parquet", "Parquet", "USDM county-week, NASS state-week, hurricane tracks and landfalls"),

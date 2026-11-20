@@ -55,11 +55,11 @@ def ordinal_metrics(y, p):
 
 
 # ---------------------------------------------------------------- gradient boosting
-def lgbm_fit(Xtr, ytr, Xva, yva, objective="regression", num_class=None):
+def lgbm_fit(Xtr, ytr, Xva, yva, objective="regression", num_class=None, num_threads=8):
     import lightgbm as lgb
     params = dict(objective=objective, learning_rate=0.05, num_leaves=63, min_data_in_leaf=200,
                   feature_fraction=0.8, bagging_fraction=0.8, bagging_freq=1, lambda_l2=1.0, seed=SEED,
-                  verbose=-1, num_threads=8)
+                  verbose=-1, num_threads=num_threads, force_col_wise=True)
     if num_class:
         params["num_class"] = num_class
     dtr = lgb.Dataset(Xtr, ytr)
@@ -103,16 +103,23 @@ class AttentionMIL(nn.Module):
         self.score = nn.Linear(d, 1)
         self.cut = nn.Parameter(torch.linspace(-1, 1, n_class - 1))
 
-    def forward(self, bag):
+    def forward(self, bag, mask=None):
+        """bag: (instances, features) or a padded batch (bags, instances, features) with mask (bags, instances),
+        True for real instances. Returns P(y > k), k = 0..K-2, and the attention weights."""
+        single = bag.dim() == 2
+        if single:
+            bag = bag.unsqueeze(0)
+            mask = torch.ones(bag.shape[:2], dtype=torch.bool, device=bag.device)
         m = torch.isfinite(bag)
         x = torch.where(m, bag, torch.zeros_like(bag))
         h = self.emb(torch.cat([x, m.float()], -1))
-        a = self.w(torch.tanh(self.V(h)) * torch.sigmoid(self.U(h)))
-        a = torch.softmax(a, 0)
-        z = (a * h).sum(0)
+        a = self.w(torch.tanh(self.V(h)) * torch.sigmoid(self.U(h))).squeeze(-1)
+        a = torch.softmax(a.masked_fill(~mask, float("-inf")), 1)
+        z = (a.unsqueeze(-1) * h).sum(1)
         f = self.score(z)
         cuts = torch.cumsum(torch.nn.functional.softplus(self.cut), 0) - 1
-        return torch.sigmoid(f - cuts), a.squeeze(-1)       # P(y > k), k = 0..K-2
+        p = torch.sigmoid(f - cuts)
+        return (p[0], a[0]) if single else (p, a)
 
 
 def _standardize(train, *others):
@@ -123,28 +130,29 @@ def _standardize(train, *others):
 
 
 def train_seq(Xtr, Str, ytr, Xva, Sva, yva, loss="mse", n_out=1, epochs=40, batch=2048, lr=2e-3, patience=5):
+    """Data are moved to the device once (unified memory on Apple silicon); batches are indexed on the device."""
     set_seed()
     (Xtr, Xva), xnorm = _standardize(Xtr, Xva)
     (Str, Sva), snorm = _standardize(Str, Sva)
     model = SeqEncoder(Xtr.shape[-1], Str.shape[-1], seq_len=Xtr.shape[1], n_out=n_out).to(DEVICE)
     opt = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=1e-4)
     lf = nn.MSELoss() if loss == "mse" else nn.BCEWithLogitsLoss()
-    t = lambda a: torch.tensor(a, dtype=torch.float32)
-    Xtr_t, Str_t, ytr_t = t(Xtr), t(Str), t(ytr).reshape(-1, n_out)
+    dev = lambda a: torch.as_tensor(np.ascontiguousarray(a, dtype=np.float32), device=DEVICE)
+    Xtr_t, Str_t, ytr_t = dev(Xtr), dev(Str), dev(ytr).reshape(-1, n_out)
+    Xva_t, Sva_t, yva_t = dev(Xva), dev(Sva), dev(yva).reshape(-1, n_out)
     best, best_state, bad = np.inf, None, 0
     for ep in range(epochs):
         model.train()
-        perm = torch.randperm(len(Xtr_t))
+        perm = torch.randperm(len(Xtr_t)).to(DEVICE)      # same order as before: generated on the CPU
         for k in range(0, len(perm), batch):
             i = perm[k:k + batch]
             opt.zero_grad()
-            l = lf(model(Xtr_t[i].to(DEVICE), Str_t[i].to(DEVICE)), ytr_t[i].to(DEVICE))
+            l = lf(model(Xtr_t[i], Str_t[i]), ytr_t[i])
             l.backward()
             nn.utils.clip_grad_norm_(model.parameters(), 1.0)
             opt.step()
-        pv = predict_seq(model, Xva, Sva, standardized=True)
-        vl = np.mean((pv - yva.reshape(-1, n_out)) ** 2) if loss == "mse" else \
-            float(lf(t(pv), t(yva).reshape(-1, n_out)))
+        pv = _predict_tensor(model, Xva_t, Sva_t)
+        vl = float(torch.mean((pv - yva_t) ** 2)) if loss == "mse" else float(lf(pv, yva_t))
         if vl < best - 1e-5:
             best, bad = vl, 0
             best_state = {k: v.detach().clone() for k, v in model.state_dict().items()}
@@ -157,38 +165,66 @@ def train_seq(Xtr, Str, ytr, Xva, Sva, yva, loss="mse", n_out=1, epochs=40, batc
     return model
 
 
-def predict_seq(model, X, S, standardized=False, batch=8192):
+def _predict_tensor(model, X, S, batch=16384):
     model.eval()
+    with torch.no_grad():
+        return torch.cat([model(X[k:k + batch], S[k:k + batch]) for k in range(0, len(X), batch)])
+
+
+def predict_seq(model, X, S, standardized=False, batch=16384):
     if not standardized:
         (xm, xs), (sm, ss) = model.norm
         X, S = (X - xm) / xs, (S - sm) / ss
+    dev = lambda a: torch.as_tensor(np.ascontiguousarray(a, dtype=np.float32), device=DEVICE)
+    return _predict_tensor(model, dev(X), dev(S), batch).cpu().numpy()
+
+
+def _pad(bags, device):
+    """List of (instances, features) tensors -> padded (bags, max instances, features) and mask."""
+    n = max(len(b) for b in bags)
+    x = torch.full((len(bags), n, bags[0].shape[1]), float("nan"), device=device)
+    mask = torch.zeros((len(bags), n), dtype=torch.bool, device=device)
+    for j, b in enumerate(bags):
+        x[j, :len(b)] = b
+        mask[j, :len(b)] = True
+    return x, mask
+
+
+def _size_buckets(sizes, batch, pool=8):
+    """Random batches of bags of similar size (less padding): shuffle, sort within pools of pool*batch bags by size,
+    cut into batches, shuffle the batches."""
+    order = np.random.permutation(len(sizes))
     out = []
-    with torch.no_grad():
-        for k in range(0, len(X), batch):
-            xb = torch.tensor(X[k:k + batch], dtype=torch.float32, device=DEVICE)
-            sb = torch.tensor(S[k:k + batch], dtype=torch.float32, device=DEVICE)
-            out.append(model(xb, sb).cpu().numpy())
-    return np.concatenate(out)
+    for k in range(0, len(order), pool * batch):
+        ix = order[k:k + pool * batch]
+        ix = ix[np.argsort(sizes[ix], kind="stable")]
+        out += [ix[j:j + batch] for j in range(0, len(ix), batch)]
+    return [out[i] for i in np.random.permutation(len(out))]
 
 
-def train_mil(bags_tr, ytr, bags_va, yva, n_class=4, epochs=60, lr=1e-3, patience=8):
+def train_mil(bags_tr, ytr, bags_va, yva, n_class=4, epochs=60, lr=8e-3, patience=8, batch=16):
+    """Bags are trained in mini-batches of 16 bags of similar size (padded, masked attention) on the device; the
+    learning rate is scaled with the batch (1e-3 per bag -> 8e-3 per 16 bags), which matched per-bag training
+    accuracy in tests."""
     set_seed()
     allx = np.concatenate(bags_tr)
     mu, sd = np.nanmean(allx, 0), np.nanstd(allx, 0)
     sd = np.where(sd > 0, sd, 1)
-    norm = lambda bs: [torch.tensor((b - mu) / sd, dtype=torch.float32) for b in bs]
+    norm = lambda bs: [torch.as_tensor(((b - mu) / sd).astype(np.float32), device=DEVICE) for b in bs]
     Btr, Bva = norm(bags_tr), norm(bags_va)
-    model = AttentionMIL(allx.shape[1], n_class=n_class)
+    model = AttentionMIL(allx.shape[1], n_class=n_class).to(DEVICE)
     opt = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=1e-4)
-    targets = lambda y: torch.tensor((np.arange(n_class - 1)[None] < np.asarray(y)[:, None]).astype(np.float32))
-    Ttr = targets(ytr)
+    Ttr = torch.as_tensor((np.arange(n_class - 1)[None] < np.asarray(ytr)[:, None]).astype(np.float32),
+                          device=DEVICE)
+    sizes = np.array([len(b) for b in Btr])
     best, best_state, bad = np.inf, None, 0
     for ep in range(epochs):
         model.train()
-        for i in np.random.permutation(len(Btr)):
+        for ix in _size_buckets(sizes, batch):
+            x, mask = _pad([Btr[i] for i in ix], DEVICE)
             opt.zero_grad()
-            p, _ = model(Btr[i])
-            l = nn.functional.binary_cross_entropy(p.clamp(1e-6, 1 - 1e-6), Ttr[i])
+            p, _ = model(x, mask)
+            l = nn.functional.binary_cross_entropy(p.clamp(1e-6, 1 - 1e-6), Ttr[ix])
             l.backward()
             opt.step()
         pv = predict_mil(model, Bva, prepared=True)
@@ -205,14 +241,29 @@ def train_mil(bags_tr, ytr, bags_va, yva, n_class=4, epochs=60, lr=1e-3, patienc
     return model
 
 
-def predict_mil(model, bags, prepared=False):
+def predict_mil(model, bags, prepared=False, batch=64):
     model.eval()
     if not prepared:
         mu, sd = model.norm
-        bags = [torch.tensor((b - mu) / sd, dtype=torch.float32) for b in bags]
+        bags = [torch.as_tensor(((b - mu) / sd).astype(np.float32), device=DEVICE) for b in bags]
     out = []
     with torch.no_grad():
-        for b in bags:
-            p, _ = model(b)
-            out.append(float((p > 0.5).sum()))
-    return np.array(out)
+        for k in range(0, len(bags), batch):
+            x, mask = _pad(bags[k:k + batch], DEVICE)
+            p, _ = model(x, mask)
+            out.append((p > 0.5).sum(1).float().cpu().numpy())
+    return np.concatenate(out)
+
+
+def event_fold(X, y, event_ids, ev, kind, simple, threads):
+    """One leave-one-event-out fold of benchmark Task 2 (module level, so worker processes can import it)."""
+    te = event_ids == ev
+    rng = np.random.default_rng(SEED)
+    others = np.unique(event_ids[~te])
+    va_ev = rng.choice(others, max(1, int(0.15 * len(others))), replace=False)
+    va = np.isin(event_ids, va_ev) & ~te
+    tr = ~te & ~va
+    gbm = lgbm_fit(X[tr], y[tr], X[va], y[va], objective="binary", num_threads=threads)
+    p = gbm.predict(X[te], num_threads=threads)
+    return [{"task": 2, "event_id": ev, "kind": kind, "model": m, **binary_metrics(y[te], q)}
+            for m, q in (("rule_dNDVI_dMNDWI", simple[te]), ("lightgbm", p))]
