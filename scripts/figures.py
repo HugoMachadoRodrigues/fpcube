@@ -1,7 +1,7 @@
 """Figures for the manuscript, numbered as in the text. Each figure is skipped (with a message) if its inputs do not
 exist yet.
 
-python scripts/figures.py [fig1 fig2 fig3 fig4 fig5] [--release v1.0]
+python scripts/figures.py [fig1 ... fig6] [--release v1.0]
 
 Design rules shared by all figures: 180 mm wide, Helvetica, panel titles that state the finding with a one-line
 subtitle saying what is plotted, direct labels instead of legends where possible, reference models in greys and
@@ -235,7 +235,7 @@ def usdm_class(u):
     return np.select([u.D4 >= 50, u.D3 >= 50, u.D2 >= 50, u.D1 >= 50, u.D0 >= 50], [5, 4, 3, 2, 1], 0)
 
 
-def fig2(rel):
+def fig3(rel):
     """Two example fields: observed and gap-filled NDVI, Sentinel-1 backscatter, rainfall and county drought."""
     if not rel or not (rel / "cube.zarr").exists():
         print("fig2: no release yet"); return
@@ -335,11 +335,11 @@ def fig2(rel):
                handlelength=1.4, columnspacing=1.2,
                title="County drought class (US Drought Monitor class covering ≥ 50 % of the county); "
                      "dashed lines: hurricane landfalls in Florida; γ⁰: Sentinel-1 backscatter", title_fontsize=6)
-    save(fig, "fig2_field_series")
+    save(fig, "fig3_field_series")
 
 
 # ---------------------------------------------------------------------------------------------------------------- 3
-def fig3(rel):
+def fig4(rel):
     """Observation density: usable optical days and Sentinel-1 days per field and year, and the monthly share of
     observed, gap-filled and empty field-periods."""
     if not rel or not (rel / "optical_observations").exists():
@@ -422,7 +422,7 @@ def fig3(rel):
     ax.set_ylabel("Field-periods (%)")
     ax.grid(axis="x", visible=False)
     head(ax, "c", "The wet season has the most gaps", "5-day optical composites, all years")
-    save(fig, "fig3_coverage")
+    save(fig, "fig4_coverage")
 
 
 # ---------------------------------------------------------------------------------------------------------------- 4
@@ -434,10 +434,10 @@ def _traj(a, k, rows, pre=12, post=12):
                 np.nanpercentile(seg, 25, 0), np.nanpercentile(seg, 75, 0))
 
 
-def fig4(rel):
+def fig5(rel):
     """Hurricane Ian (2022) and the January 2018 freeze, observed optical values only."""
     if not rel or not (rel / "cube.zarr").exists():
-        print("fig4: no release yet"); return
+        print("fig5: no release yet"); return
     from fpcube.benchmark.tasks import observed_only
     cube = observed_only(_cube(rel)[["ndvi", "mndwi", "vv_db", "ppt_sum", "tmin_mean", "n_optical_obs"]].load())
     f = fields_table(rel)
@@ -630,14 +630,14 @@ def fig4(rel):
     ax.set_ylabel("Fields (%)")
     ax.grid(axis="x", visible=False)
     head(ax, "f", "The freeze added 0.05 to the winter decline", f"per field, n = {num(len(v))}")
-    save(fig, "fig4_events")
+    save(fig, "fig5_events")
 
 
 # ---------------------------------------------------------------------------------------------------------------- 5
-def fig5(rel):
+def fig6(rel):
     b = rel / "benchmark" if rel else None
     if not b or not (b / "task1_results.csv").exists():
-        print("fig5: no benchmark yet"); return
+        print("fig6: no benchmark yet"); return
     r1 = pd.read_csv(b / "task1_results.csv")
     fig = plt.figure(figsize=(W, 5.4))
     gs = GridSpec(2, 1, figure=fig, height_ratios=[1, 1.05], hspace=0.62)
@@ -770,12 +770,184 @@ def fig5(rel):
                 head(ax, "d", "Field evidence anticipates drought worsening", None, pad=12)
                 ax.text(0, -0.3, "Task 3, county drought class; line: 95 % interval", transform=ax.transAxes,
                         fontsize=5.6, color=MUTED, va="top")
-    save(fig, "fig5_benchmark")
+    save(fig, "fig6_benchmark")
+
+
+# ------------------------------------------------------------------------------------------------------------- cube
+CUBE_VARS = [  # (variable, label, group)
+    ("ndvi", "NDVI", "optical"), ("evi", "EVI", "optical"), ("ndmi", "NDMI", "optical"),
+    ("mndwi", "MNDWI", "optical"), ("nbr", "NBR", "optical"), ("blue", "blue", "optical"),
+    ("green", "green", "optical"), ("red", "red", "optical"), ("nir", "NIR", "optical"),
+    ("swir1", "SWIR1", "optical"), ("swir2", "SWIR2", "optical"), ("ndvi_sd", "NDVI s.d.", "optical"),
+    ("water_frac", "water fraction", "optical"), ("vv_db", "VV", "radar"), ("vh_db", "VH", "radar"),
+    ("vh_vv_db", "VH/VV", "radar"), ("ppt_sum", "rain", "weather"), ("tmin_mean", "Tmin", "weather"),
+    ("tmean_mean", "Tmean", "weather"), ("tmax_mean", "Tmax", "weather"), ("vpdmax_mean", "VPDmax", "weather"),
+    ("n_optical_obs", "optical obs.", "qa"), ("n_radar_obs", "radar obs.", "qa"), ("gap_filled", "gap-filled", "qa")]
+GROUP_CMAP = {"optical": cmc.bamako_r, "radar": cmc.acton_r, "weather": cmc.devon_r, "qa": cmc.grayC}
+GROUP_COL = {"optical": "#3f7d3a", "radar": VIOLET, "weather": "#2f5f98", "qa": REF_D}
+
+
+def _rgb(a, group, lo=None, hi=None):
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", RuntimeWarning)
+        lo = np.nanpercentile(a, 2) if lo is None else lo
+        hi = np.nanpercentile(a, 98) if hi is None else hi
+    z = np.clip((a - lo) / (hi - lo + 1e-12), 0, 1)
+    rgb = GROUP_CMAP[group](0.12 + 0.8 * np.nan_to_num(z))
+    rgb[~np.isfinite(a)] = (1, 1, 1, 1)
+    return rgb
+
+
+def fig2(rel):
+    """What the cube is: field-level observations from each source, composited on a common 5-day calendar into a
+    field x time x variable array, with a field's time series and a statewide map as two of its slices.
+    Every face is drawn from the released data."""
+    if not rel or not (rel / "cube.zarr").exists():
+        print("fig2: no release yet"); return
+    cube = _cube(rel)
+    f = fields_table(rel)
+    times = pd.DatetimeIndex(cube.time.values)
+    rng = np.random.default_rng(7)
+    focus_id = "FPC067081"
+    fi = int(np.nonzero(cube.field.values == focus_id)[0][0])
+    pick = np.sort(np.r_[rng.choice(len(f), 299, replace=False), fi])
+    pick = np.unique(pick)
+    order = np.argsort(f.lat.to_numpy()[pick])            # south at the bottom, north at the top
+    pick = pick[order]
+    row_focus = int(np.nonzero(pick == fi)[0][0])
+    sub = cube.isel(field=pick)[[v for v, _, _ in CUBE_VARS]].load()
+    nd = sub.ndvi.values                                   # fields x time
+    obs_share = (cube.n_optical_obs > 0).mean("field").to_series()
+    t_focus = int(np.argmax(obs_share[obs_share.index.year == 2025].values)) + int(np.nonzero(times.year == 2025)[0][0])
+
+    fig = plt.figure(figsize=(W, 3.75))
+    ax = fig.add_axes([0, 0, 1, 1])
+    ax.set_xlim(0, 100); ax.set_ylim(0, 53); ax.set_aspect("equal"); ax.axis("off")
+    x0, y0, Wf, Hf, dx, dy = 33.5, 8.0, 31.0, 29.0, 10.0, 8.0
+    ax.text(0.6, 51.0, "One value per field, 5-day period and variable", fontsize=7.6, fontweight="bold",
+            color=INK, ha="left", va="center")
+
+    # front face: NDVI, fields x time (gaps left white)
+    ax.imshow(_rgb(nd, "optical", 0.2, 0.9), extent=(x0, x0 + Wf, y0, y0 + Hf), origin="lower", aspect="auto",
+              interpolation="nearest", zorder=2)
+    # top face: every variable through time (median over the sampled fields); side face: every variable per field
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", RuntimeWarning)
+        top = np.stack([_rgb(np.nanmedian(sub[v].values.astype(float), 0)[None, :], g)[0] for v, _, g in CUBE_VARS])
+        side = np.stack([_rgb(np.nanmean(sub[v].values.astype(float), 1)[:, None], g)[:, 0] for v, _, g in CUBE_VARS],
+                        axis=1)
+    im = ax.imshow(top, extent=(0, 1, 0, 1), origin="lower", aspect="auto", interpolation="nearest", zorder=2)
+    im.set_transform(mpl.transforms.Affine2D(np.array([[Wf, dx, x0], [0, dy, y0 + Hf], [0, 0, 1]])) + ax.transData)
+    im = ax.imshow(side, extent=(0, 1, 0, 1), origin="lower", aspect="auto", interpolation="nearest", zorder=2)
+    im.set_transform(mpl.transforms.Affine2D(np.array([[dx, 0, x0 + Wf], [dy, Hf, y0], [0, 0, 1]])) + ax.transData)
+    nv = len(CUBE_VARS)
+    for k in range(1, nv):
+        u = k / nv
+        lw = 0.6 if CUBE_VARS[k][2] != CUBE_VARS[k - 1][2] else 0.15
+        col = "white" if lw < 0.5 else INK
+        ax.plot([x0 + u * dx, x0 + Wf + u * dx], [y0 + Hf + u * dy] * 2, color=col, lw=lw, zorder=3)
+        ax.plot([x0 + Wf + u * dx] * 2, [y0 + u * dy, y0 + Hf + u * dy], color=col, lw=lw, zorder=3)
+    P = lambda u, v, w: (x0 + u * Wf + w * dx, y0 + v * Hf + w * dy)      # u time, v field, w variable
+    edges = [((0, 0, 0), (1, 0, 0)), ((1, 0, 0), (1, 1, 0)), ((1, 1, 0), (0, 1, 0)), ((0, 1, 0), (0, 0, 0)),
+             ((0, 1, 0), (0, 1, 1)), ((1, 1, 0), (1, 1, 1)), ((1, 0, 0), (1, 0, 1)), ((0, 1, 1), (1, 1, 1)),
+             ((1, 1, 1), (1, 0, 1))]
+    for a_, b_ in edges:
+        (xa, ya), (xb, yb) = P(*a_), P(*b_)
+        ax.plot([xa, xb], [ya, yb], color=INK, lw=0.7, zorder=4, solid_capstyle="round")
+    # dimensions
+    arr = dict(arrowstyle="-|>", color=INK2, lw=0.6, mutation_scale=6)
+    ax.annotate("", np.array(P(1, 0, 0)) + [0, -1.5], xytext=np.array(P(0, 0, 0)) + [0, -1.5], arrowprops=arr)
+    ax.text(x0 + Wf / 2, y0 - 2.3, f"time: {len(times)} five-day periods, Jan {times[0]:%Y} – {times[-1]:%b %Y}",
+            ha="center", va="top", fontsize=6.3, color=INK)
+    ax.annotate("", np.array(P(0, 1, 0)) + [-1.5, 0], xytext=np.array(P(0, 0, 0)) + [-1.5, 0], arrowprops=arr)
+    ax.text(x0 - 2.3, y0 + Hf / 2, f"fields: {num(cube.sizes['field'])} (300 shown, south to north)", ha="right",
+            va="center", fontsize=6.3, color=INK, rotation=90)
+    ax.annotate("", np.array(P(1, 0, 1)) + [1.2, 0], xytext=np.array(P(1, 0, 0)) + [1.2, 0], arrowprops=arr)
+    ax.text(*(np.array(P(1, 0, 0.45)) + [2.1, -0.7]), f"variables: {nv}", fontsize=6.3, color=INK, ha="left",
+            va="top", rotation=np.degrees(np.arctan2(dy, dx)), rotation_mode="anchor")
+    ax.text(x0 + 0.6, y0 + Hf - 0.7, "NDVI", fontsize=6.2, color=INK, fontweight="bold", va="top", ha="left",
+            path_effects=STROKE, zorder=6)
+    # variable names by group, with leaders to their band on the cube (back group at the top)
+    names = {"qa": ["counts and flag: optical obs., radar obs., gap-filled"],
+             "weather": ["weather: rain, Tmin, Tmean, Tmax, VPDmax"],
+             "radar": ["radar: VV, VH, VH/VV"],
+             "optical": ["optical: NDVI, EVI, NDMI, MNDWI, NBR, NDVI s.d.,",
+                         "water fraction, blue, green, red, NIR, SWIR1, SWIR2"]}
+    yt = 52.3
+    for g in ("qa", "weather", "radar", "optical"):
+        ks = [k for k, (_, _, gg) in enumerate(CUBE_VARS) if gg == g]
+        xa, ya = P(1, 1, (ks[0] + ks[-1] + 1) / 2 / nv)
+        txt = "\n".join(names[g])
+        ax.text(77.0, yt, txt, fontsize=5.3, color=GROUP_COL[g], ha="left", va="top", linespacing=1.25,
+                fontweight="bold" if False else "normal")
+        ymid = yt - 0.85 * len(names[g])
+        ax.plot([xa, 75.6, 76.5], [ya, ymid, ymid], color=GROUP_COL[g], lw=0.5, zorder=5)
+        ax.plot(xa, ya, "o", ms=1.8, color=GROUP_COL[g], zorder=6)
+        yt -= 1.75 * len(names[g]) + 0.35
+    # highlighted slices: one field (row) and one period (column)
+    yr = y0 + (row_focus + 0.5) / len(pick) * Hf
+    xc = x0 + (t_focus + 0.5) / len(times) * Wf
+    ax.add_patch(Rectangle((x0, yr - 0.5), Wf, 1.0, fill=False, edgecolor=ORANGE, lw=1.1, zorder=5))
+    ax.add_patch(Rectangle((xc - 0.35, y0), 0.7, Hf, fill=False, edgecolor=BLUE, lw=1.1, zorder=5))
+
+    # sources, left, and the processing between them and the cube
+    src = [("Landsat + Sentinel-2 (HLS)", "30 m, every 2–3 days", "optical"),
+           ("Sentinel-1 backscatter", "10 m, every 6–12 days", "radar"),
+           ("PRISM weather", "4 km, daily", "weather"),
+           ("gNATSGO, 3DEP, C-CAP", "soil, terrain, wetland", "qa"),
+           ("USDM, NASS, HURDAT2", "drought, condition, storms", "qa")]
+    ax.text(0.6, 45.0, "Sources", fontsize=6.6, color=INK, fontweight="bold", va="center")
+    for k, (name, res, g) in enumerate(src):
+        yy = 40.5 - k * 4.7
+        ax.add_patch(Rectangle((0.6, yy - 1.4), 1.3, 2.4, color=GROUP_COL[g], lw=0))
+        ax.text(2.6, yy + 0.4, name, fontsize=5.6, color=INK, va="center", fontweight="bold")
+        ax.text(2.6, yy - 1.1, res, fontsize=5.3, color=INK2, va="center")
+    ax.plot([20.4, 21.1, 21.1, 20.4], [42.0, 42.0, 29.4, 29.4], color=MUTED, lw=0.5)
+    ax.annotate("", (x0 - 4.4, 35.7), xytext=(21.1, 35.7),
+                arrowprops=dict(arrowstyle="-|>", color=MUTED, lw=0.7, mutation_scale=7))
+    ax.text(21.6, 34.6, "field means of\nclear pixels per\nacquisition, then\n5-day composites", fontsize=5.1,
+            color=INK2, va="top", ha="left", linespacing=1.3)
+    ax.text(0.6, 1.0, "static layers and labels are stored once per field (fields.parquet) or per county and date",
+            ha="left", va="bottom", fontsize=5.6, color=INK2)
+
+    # slices, right
+    ts = fig.add_axes([0.775, 0.45, 0.215, 0.22])
+    c = cube.isel(field=fi)[["ndvi", "n_optical_obs"]].load()
+    ts.plot(times, c.ndvi.values, color=BLUE_L, lw=0.5)
+    ok = c.n_optical_obs.values > 0
+    ts.plot(times[ok], c.ndvi.values[ok], "o", ms=0.9, color=ORANGE, mew=0)
+    ts.tick_params(labelsize=5.2, length=1.5, pad=1)
+    ts.xaxis.set_major_locator(mpl.dates.YearLocator(2))
+    ts.xaxis.set_major_formatter(mpl.dates.DateFormatter("%Y"))
+    ts.grid(axis="x", visible=False)
+    ts.set_title("a row: one field's NDVI through time", fontsize=6, color=ORANGE, loc="left", fontweight="bold", pad=2)
+    mp = fig.add_axes([0.775, 0.02, 0.215, 0.34])
+    co = counties().to_crs(f.crs)
+    co.dissolve().plot(ax=mp, color=LAND, edgecolor=MUTED, linewidth=0.3)
+    v = cube.ndvi.isel(time=t_focus).values
+    o_ = cube.n_optical_obs.isel(time=t_focus).values > 0
+    pts = f.geometry.representative_point()
+    mp.scatter(pts.x.values[o_], pts.y.values[o_], c=v[o_], s=0.15, cmap=cmc.bamako_r, vmin=0.2, vmax=0.9,
+               rasterized=True, linewidths=0)
+    map_axes(mp, co.total_bounds, 0.02)
+    mp.set_title(f"a column: all fields, {times[t_focus]:%d %b %Y}", fontsize=6, color=BLUE, loc="left",
+                 fontweight="bold", pad=2)
+    for s_ in ("left", "bottom"):
+        ts.spines[s_].set_color(AXIS)
+    for a_ in (ts, mp):
+        a_.set_facecolor("none")
+    con = ConnectionPatch(xyA=(x0 + Wf, yr), coordsA=ax.transData, xyB=(0, 0.5), coordsB=ts.transAxes,
+                          color=ORANGE, lw=0.6, ls=(0, (2, 2)))
+    fig.add_artist(con)
+    con = ConnectionPatch(xyA=(xc, y0), coordsA=ax.transData, xyB=(0, 0.3), coordsB=mp.transAxes,
+                          color=BLUE, lw=0.6, ls=(0, (2, 2)), connectionstyle="arc3,rad=0.25")
+    fig.add_artist(con)
+    save(fig, "fig2_data_cube")
 
 
 if __name__ == "__main__":
     ap = argparse.ArgumentParser()
-    ap.add_argument("figs", nargs="*", default=["fig1", "fig2", "fig3", "fig4", "fig5"])
+    ap.add_argument("figs", nargs="*", default=["fig1", "fig2", "fig3", "fig4", "fig5", "fig6"])
     ap.add_argument("--release", default="v1.0")
     a = ap.parse_args()
     rel = config.RELEASE / a.release

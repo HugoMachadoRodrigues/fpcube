@@ -59,7 +59,7 @@ downstream() {
     "validation|$PY -m fpcube.validation" \
     "benchmark|$PY -m fpcube.benchmark.run" \
     "release|$PY -m fpcube.release" \
-    "figures|$PY $REPO/scripts/figures.py fig1 fig2 fig3 fig4 fig5"; do
+    "figures|$PY $REPO/scripts/figures.py fig1 fig2 fig3 fig4 fig5 fig6"; do
     local name=${s%%|*} cmd=${s#*|}
     done_ "$name" && continue
     log "run $name"
