@@ -32,6 +32,16 @@ fields = gpd.read_parquet("data/release/v1.0/fields.parquet")  # one row per fie
 ndvi = cube.ndvi.sel(field="FPC000123")
 ```
 
+From the Zenodo files, the cube opens without unzipping:
+
+```python
+import zarr
+cube = xr.open_zarr(zarr.storage.ZipStore("cube.zarr.zip", mode="r"))
+```
+
+Unzipping every zip in one folder (`unzip cube.zarr.zip -d cube.zarr`, the others as they are) gives back the release
+layout; `shasum -a 256 -c SHA256SUMS` then checks every file, and `stac/catalog.json` describes them.
+
 ## Rebuilding
 
 ```bash
@@ -58,6 +68,18 @@ and `python -m fpcube.validation`; the validation text states the retrieval date
 | 3 County drought | fields of a county, 30 days | USDM class (none, D0, D1, D2+) | as Task 1 |
 
 `python -m fpcube.benchmark.run` reproduces the baselines.
+
+## Publishing a version on Zenodo
+
+1. `python -m fpcube.release v1.0` writes `DATASHEET.md`, `stac/` and `SHA256SUMS` in `data/release/v1.0`.
+2. `python -m fpcube.release v1.0 --deposit` writes `data/deposit/v1.0`: the files to upload (one zip per directory,
+   stored, plus `DEPOSIT_SHA256SUMS`). It can be deleted after the upload.
+3. Data record: new Zenodo upload with the metadata in `zenodo/dataset_v1.0.json` (title, description, licence,
+   keywords, notes with the Copernicus attribution); upload every file of `data/deposit/v1.0`.
+4. Code record: make this repository public, switch it on at zenodo.org/account/settings/github, and publish a GitHub
+   release (tag `v1.0.0`); Zenodo archives it with `.zenodo.json` and `CITATION.cff`.
+5. Write both DOIs to `zenodo/dois.json` (`{"DataDOI": "https://doi.org/...", "CodeDOI": "https://doi.org/..."}`) and
+   rerun `scripts/paper_numbers.py`; if the Word manuscript has already been edited by hand, paste them there too.
 
 ## Licence
 

@@ -77,6 +77,9 @@ def numbers(rel):
         n["TaskOneSkill"] = f"{100 * best.skill_vs_ref.max():.0f}\\,\\%"
     if b and (b / "benchmark_text.json").exists():
         n.update(json.loads((b / "benchmark_text.json").read_text()))
+    dois = MS.parent / "zenodo" / "dois.json"           # {"DataDOI": "https://doi.org/...", "CodeDOI": "..."}
+    if dois.exists():
+        n.update(json.loads(dois.read_text()))
     n.setdefault("DataDOI", "https://doi.org/10.5281/zenodo.TBD")
     n.setdefault("CodeURL", "https://github.com/HugoMachadoRodrigues/fpcube")
     n.setdefault("CodeDOI", "https://doi.org/10.5281/zenodo.TBD")
@@ -135,7 +138,7 @@ def tables(rel):
              ("radar\\_observations/YYYY.parquet", "Parquet", "one row per field and Sentinel-1 acquisition"),
              ("labels/*.parquet", "Parquet", "USDM county-week, NASS state-week, hurricane tracks and landfalls"),
              ("benchmark/", "Parquet, CSV", "sample indices, splits and baseline results of Tasks 1--3"),
-             ("catalog.json", "STAC 1.1", "catalog of all assets with checksums"),
+             ("stac/catalog.json", "STAC 1.1", "catalog of all assets with checksums"),
              ("DATASHEET.md", "Markdown", "datasheet for the data set")]
     t = ["\\begin{tabular}{lll}", "\\tophline", "Path & Format & Content\\\\", "\\middlehline"]
     t += [f"\\texttt{{{a}}} & {b} & {c}\\\\" for a, b, c in files]

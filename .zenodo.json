@@ -1,0 +1,26 @@
+{
+  "upload_type": "software",
+  "title": "fpcube: processing code for the Florida Pasture Cube",
+  "creators": [
+    {
+      "name": "Rodrigues, Hugo",
+      "affiliation": "University of Florida, Institute of Food and Agricultural Sciences, Range Cattle Research and Education Center, Ona, Florida, USA"
+    }
+  ],
+  "license": "MIT",
+  "language": "eng",
+  "access_right": "open",
+  "keywords": [
+    "pasture",
+    "grazing lands",
+    "Florida",
+    "data cube",
+    "Harmonized Landsat Sentinel-2",
+    "Sentinel-1",
+    "PRISM",
+    "drought",
+    "hurricanes",
+    "machine learning benchmark"
+  ],
+  "description": "<p>Python package that builds the Florida Pasture Cube from public sources (HLS, Sentinel-1 RTC, PRISM, gNATSGO, 3DEP, C-CAP, CDL, Florida parcel data, US Drought Monitor, NASS, HURDAT2), validates it, runs the three benchmark tasks and writes the release with its datasheet, STAC catalog and checksums.</p>"
+}

@@ -1,0 +1,17 @@
+cff-version: 1.2.0
+message: "If you use this software, please cite it as below. If you use the data, cite the Florida Pasture Cube data set (DOI in the README)."
+title: "fpcube: processing code for the Florida Pasture Cube"
+type: software
+version: 1.0.0
+license: MIT
+repository-code: "https://github.com/HugoMachadoRodrigues/fpcube"
+authors:
+  - family-names: Rodrigues
+    given-names: Hugo
+    affiliation: "University of Florida, Institute of Food and Agricultural Sciences, Range Cattle Research and Education Center"
+keywords:
+  - pasture
+  - Florida
+  - data cube
+  - remote sensing
+  - machine learning benchmark
