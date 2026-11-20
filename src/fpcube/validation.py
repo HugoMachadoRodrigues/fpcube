@@ -7,7 +7,12 @@ text snippets are inserted into the paper by scripts/paper_numbers.py.
    a. NDVI seasonality by region (timing of the seasonal minimum and maximum);
    b. NDVI anomaly vs 60-day rainfall anomaly (drought signal) per field, across years;
    c. VV backscatter response to rain in the preceding 5 days (soil moisture signal);
-   d. Hurricane Ian (landfall 28 Sep 2022): MNDWI and VV change vs HAND for fields that received >= 200 mm.
+   d. Hurricane Ian (landfall 28 Sep 2022): change of observed MNDWI and VV by HAND class for fields that received
+      >= 200 mm in the two 5-day periods around landfall (10 days), with field counts and cluster-bootstrap intervals.
+4. Quality: interpolation (with its denominators), unobserved fields, geometric-check states, radar orbit mixing
+   within a period and orbit changes between consecutive periods, multipart fields, area accounting of the
+   delineation, woody wetland left by the woody screen, and quality by tier, field size and season.
+All optical statistics of the cube use observed composites only unless stated (tasks.observed_only).
 """
 import json
 import sys
@@ -60,12 +65,16 @@ def delineation_text(wc, fields):
         w = g.area_ha / g.area_ha.sum()
         out[tier] = {c: float((g[c] * w).sum()) for c in ("grassland", "tree", "cropland", "built",
                                                           "herbaceous_wetland", "water") if c in g}
+    w = m.area_ha / m.area_ha.sum()
+    out["all"] = {c: float((m[c] * w).sum()) for c in ("grassland", "cropland", "tree") if c in m}
     txt = ("ESA WorldCover 2021 \\citep{{zanaga2022}}, which is derived from Sentinel-1 and Sentinel-2 independently of "
            "the CDL, maps {gA:.0f}\\,\\% of the area of tier~A fields and {gB:.0f}\\,\\% of tier~B fields as grassland "
            "and a further {cA:.0f}\\,\\% and {cB:.0f}\\,\\% as cropland, which in Florida includes hay and improved "
-           "pasture. Trees cover {tA:.0f}\\,\\% (A) and {tB:.0f}\\,\\% (B) and herbaceous wetland {wA:.0f}\\,\\% and "
-           "{wB:.0f}\\,\\%, mostly as scattered trees, hammocks and wet depressions inside working pastures. Built-up "
-           "land is below {bmax:.1f}\\,\\% in both tiers.").format(
+           "pasture ({gcAll:.1f}\\,\\% of the area of all fields together). Trees cover {tA:.0f}\\,\\% (A) and "
+           "{tB:.0f}\\,\\% (B) and herbaceous wetland {wA:.0f}\\,\\% and {wB:.0f}\\,\\%. Built-up land is below "
+           "{bmax:.1f}\\,\\% in both tiers. This is agreement on land cover, not a measure of grazing use or of "
+           "boundary accuracy.").format(
+        gcAll=100 * (out["all"]["grassland"] + out["all"]["cropland"]),
         gA=100 * out["A"]["grassland"], gB=100 * out["B"]["grassland"], cA=100 * out["A"]["cropland"],
         cB=100 * out["B"]["cropland"], tA=100 * out["A"]["tree"], tB=100 * out["B"]["tree"],
         wA=100 * out["A"].get("herbaceous_wetland", 0), wB=100 * out["B"].get("herbaceous_wetland", 0),
@@ -74,54 +83,79 @@ def delineation_text(wc, fields):
 
 
 def coverage(rel, cube, fields):
+    """Observation counts. A usable optical observation is one field x acquisition day with qa_use (records of the
+    same day from overlapping tiles or both sensors count once). Per-field counts include fields with none."""
     opt = pd.concat(pd.read_parquet(p, columns=["fid", "date", "sensor", "qa_clear", "qa_geometry",
-                                                    "qa_range", "qa_haze", "qa_use"])
-                    for p in (rel / "optical_observations").glob("*.parquet"))
+                                                    "qa_geometry_status", "qa_range", "qa_haze", "qa_use"])
+                    for p in sorted((rel / "optical_observations").glob("*.parquet")))
     rad = pd.concat(pd.read_parquet(p, columns=["fid", "date"]) for p in (rel / "radar_observations").glob("*.parquet"))
-    n = len(fields)
+    full_years = [y for y in config.YEARS if pd.Timestamp(f"{y}-12-31") <= pd.Timestamp(config.END)]
     good = opt[opt.qa_use]
-    yrs = pd.to_datetime(good.date).dt.year
-    per_year = good.groupby(yrs).size() / n
-    rad_year = rad.groupby(pd.to_datetime(rad.date).dt.year).size() / n
-    has = (cube.n_optical_obs.values > 0)
+    days = good.assign(day=pd.to_datetime(good.date).dt.normalize()).drop_duplicates(["fid", "day"])
+    cnt = days.groupby(["fid", days.day.dt.year]).size().unstack(fill_value=0)
+    cnt = cnt.reindex(index=fields.fid, columns=full_years, fill_value=0)
+    per_year = cnt.median(axis=0)                                   # median field, each full year
+    rd = rad.assign(day=pd.to_datetime(rad.date).dt.normalize()).drop_duplicates(["fid", "day"])
+    rcnt = rd.groupby(["fid", rd.day.dt.year]).size().unstack(fill_value=0).reindex(
+        index=fields.fid, columns=full_years, fill_value=0)
+    rad_year = rcnt.median(axis=0)
+    obs = cube.n_optical_obs.values > 0
     filled = cube.gap_filled.values
     month = pd.DatetimeIndex(cube.time.values).month
     wet = np.isin(month, [6, 7, 8, 9])
-    stats = {"clear_per_field_year_median": float(per_year.median()), "clear_per_field_year_min": float(per_year.min()),
-             "clear_per_field_year_max": float(per_year.max()), "clear_frac_of_all_obs": float(len(good) / len(opt)),
+    gs = opt.qa_geometry_status.astype(str)
+    stats = {"usable_days_per_field_year_median": float(per_year.median()),
+             "usable_days_per_field_year_min": float(per_year.min()),
+             "usable_days_per_field_year_max": float(per_year.max()),
+             "usable_days_per_field_mean_over_years_median": float(cnt.mean(axis=1).median()),
+             "full_years": f"{full_years[0]}-{full_years[-1]}",
+             "clear_frac_of_all_obs": float(len(good) / len(opt)),
              "clear_test_frac": float(opt.qa_clear.mean()),
-             "geom_reject_frac": float((~opt.qa_geometry).mean()),
+             "geom_fail_frac": float((gs == "fail").mean()),
+             "geom_not_assessed_frac": float((gs == "not_assessed").mean()),
+             "geom_not_assessed_frac_of_used": float((gs[opt.qa_use] == "not_assessed").mean()),
              "range_reject_frac": float((opt.qa_clear & ~opt.qa_range).mean()),
              "haze_reject_frac": float((opt.qa_clear & opt.qa_range & ~opt.qa_haze).mean()),
-             "radar_per_field_year_median": float(rad_year.median()),
-             "periods_with_optical": float(has.mean()), "periods_with_optical_wet": float(has[:, wet].mean()),
-             "periods_with_optical_dry": float(has[:, ~wet].mean()),
-             "periods_with_ndvi_after_fill": float(np.isfinite(cube.ndvi.values).mean()),
-             "gap_filled_frac": float(filled.mean())}
-    txt = ("Of all field-level HLS observations, {ct:.0f}\\,\\% passed the clear-pixel test, {gr:.1f}\\,\\% were rejected "
-           "for a geometric shift above one pixel, and {rr:.2f}\\,\\% and {hr:.2f}\\,\\% of the clear ones for reflectance outside "
-           "[$-0.01$, 1] or blue reflectance above 0.25; {cf:.0f}\\,\\% were used. A median field has {cm:.0f} usable optical observations per year "
-           "(range of yearly medians {cmin:.0f}--{cmax:.0f}, increasing as Landsat~9 and Sentinel-2C joined) and "
-           "{rm:.0f} Sentinel-1 acquisitions. {po:.0f}\\,\\% of the 5-day periods have at least one optical observation "
-           "({pd:.0f}\\,\\% in October--May, {pw:.0f}\\,\\% in June--September); after gap filling up to 30 days, "
-           "{pf:.0f}\\,\\% of periods have an NDVI value, and {gf:.0f}\\,\\% of all values are interpolated.").format(
-        cf=100 * stats["clear_frac_of_all_obs"], gr=100 * stats["geom_reject_frac"], ct=100 * stats["clear_test_frac"],
+             "radar_days_per_field_year_median": float(rad_year.median()),
+             "cells_observed": float(obs.mean()), "cells_observed_wet": float(obs[:, wet].mean()),
+             "cells_observed_dry": float(obs[:, ~wet].mean()),
+             "cells_interpolated": float(filled.mean()),
+             "cells_empty": float(1 - obs.mean() - filled.mean()),
+             "interpolated_share_of_ndvi_values": float(filled.sum() / (obs.sum() + filled.sum()))}
+    txt = ("Of all field-level HLS records, {ct:.0f}\\,\\% passed the clear-pixel test; the geometric shift could be "
+           "estimated for {ga:.0f}\\,\\% of the records (it needs a window of at least 64 by 64 clear pixels) and exceeded "
+           "one pixel in {gr:.2f}\\,\\%; the {gn:.0f}\\,\\% not assessed are kept and marked "
+           "(\\texttt{{qa\\_geometry\\_status}}). Of the clear records, {rr:.2f}\\,\\% and {hr:.2f}\\,\\% were rejected for "
+           "reflectance outside [$-0.01$, 1] or blue reflectance above 0.25; {cf:.0f}\\,\\% of all records were used. "
+           "Counting one observation per field and acquisition day, the median field has {cm:.0f} usable optical "
+           "observations per year (median over {fy}; yearly medians {cmin:.0f}--{cmax:.0f}, increasing as Landsat~9 "
+           "and Sentinel-2C joined) and {rm:.0f} Sentinel-1 acquisition days. Of all field $\\times$ 5-day cells, "
+           "{po:.0f}\\,\\% hold an observed optical composite ({pd:.0f}\\,\\% in October--May, {pw:.0f}\\,\\% in "
+           "June--September), {pi:.0f}\\,\\% an interpolated one (gaps of at most 30 days) and {pe:.0f}\\,\\% none; "
+           "interpolated values are therefore {ish:.0f}\\,\\% of the NDVI values in the cube.").format(
+        cf=100 * stats["clear_frac_of_all_obs"], ct=100 * stats["clear_test_frac"],
+        ga=100 * (1 - stats["geom_not_assessed_frac"]), gr=100 * stats["geom_fail_frac"],
+        gn=100 * stats["geom_not_assessed_frac"],
         rr=100 * stats["range_reject_frac"], hr=100 * stats["haze_reject_frac"],
-        cm=stats["clear_per_field_year_median"], cmin=per_year.min(), cmax=per_year.max(),
-        rm=stats["radar_per_field_year_median"], po=100 * stats["periods_with_optical"],
-        pd=100 * stats["periods_with_optical_dry"], pw=100 * stats["periods_with_optical_wet"],
-        pf=100 * stats["periods_with_ndvi_after_fill"], gf=100 * stats["gap_filled_frac"])
-    return stats, txt, per_year, rad_year
+        cm=stats["usable_days_per_field_year_median"], fy=stats["full_years"].replace("-", "--"),
+        cmin=per_year.min(), cmax=per_year.max(),
+        rm=stats["radar_days_per_field_year_median"], po=100 * stats["cells_observed"],
+        pd=100 * stats["cells_observed_dry"], pw=100 * stats["cells_observed_wet"],
+        pi=100 * stats["cells_interpolated"], pe=100 * stats["cells_empty"],
+        ish=100 * stats["interpolated_share_of_ndvi_values"])
+    return stats, txt, per_year, rad_year, cnt
 
 
-def physical(cube, fields):
-    from fpcube.benchmark.tasks import ndvi_anomaly
+def physical(cube, fields, B=1000):
+    """Expects the full cube; anomalies and Ian changes use observed optical composites only."""
+    from fpcube.benchmark.tasks import ndvi_anomaly, observed_only
     times = pd.DatetimeIndex(cube.time.values)
     nd = cube.ndvi.values
-    # (a) seasonality: month of minimum and maximum median NDVI, statewide
+    # (a) seasonality: month of minimum and maximum median NDVI, statewide (gap-filled values included)
     monthly = pd.Series(np.nanmedian(nd, axis=0), index=times).groupby(times.month).mean()
-    # (b) NDVI anomaly vs 60-day rainfall anomaly, April-May (dry season end) per field-year
-    an = ndvi_anomaly(cube)
+    obs_cube = observed_only(cube[["ndvi", "mndwi", "n_optical_obs"]].copy())
+    # (b) NDVI anomaly vs 60-day rainfall anomaly, April-May (dry season end) per field-period
+    an = ndvi_anomaly(obs_cube)
     ppt = cube.ppt_sum.values
     ppt60 = pd.DataFrame(ppt.T).rolling(12, min_periods=12).sum().to_numpy().T
     mu = np.nanmean(ppt60, axis=1, keepdims=True)
@@ -131,53 +165,83 @@ def physical(cube, fields):
     a, p = an[:, am].ravel(), pz[:, am].ravel()
     ok = np.isfinite(a) & np.isfinite(p)
     r_drought = float(np.corrcoef(a[ok], p[ok])[0, 1])
-    # (c) VV vs 5-day rain: periods with >= 25 mm vs <= 1 mm, per field, dry season
+    # (c) VV vs 5-day rain: periods with >= 25 mm vs <= 1 mm, per field
     vv = cube.vv_db.values
-    wetp = ppt >= 25
-    dryp = ppt <= 1
+    wetp, dryp = ppt >= 25, ppt <= 1
     dvv = np.nanmedian(np.where(wetp, vv, np.nan), axis=1) - np.nanmedian(np.where(dryp, vv, np.nan), axis=1)
-    # (d) Ian
     out = {"ndvi_month_min": int(monthly.idxmin()), "ndvi_month_max": int(monthly.idxmax()),
            "r_ndvi_anom_rain60_AM": r_drought, "n_pairs_AM": int(ok.sum()),
            "vv_wet_minus_dry_db_median": float(np.nanmedian(dvv)),
            "vv_wet_gt_dry_frac": float(np.nanmean(dvv > 0))}
+    # (d) Ian: rain in the two periods around landfall; change of observed MNDWI (max of the 3 periods after vs median
+    # of the 6 before) and VV (min of the 2 after vs median of the 6 before), by HAND class
     ian = pd.Timestamp("2022-09-28")
     k = int(np.searchsorted(times, ian))
     if "hand_mean_m" in fields and 0 < k < len(times) - 3:
         rain = np.nansum(ppt[:, k - 1:k + 1], axis=1)
         hit = rain >= 200
-        mn = cube.mndwi.values
-        dm = np.nanmax(mn[:, k:k + 3], axis=1) - np.nanmedian(mn[:, k - 6:k], axis=1)
-        dv = np.nanmin(vv[:, k:k + 2], axis=1) - np.nanmedian(vv[:, k - 6:k], axis=1)
+        mn = obs_cube.mndwi.values
+        with np.errstate(all="ignore"), __import__("warnings").catch_warnings():
+            __import__("warnings").simplefilter("ignore", RuntimeWarning)
+            dm = np.nanmax(mn[:, k:k + 3], axis=1) - np.nanmedian(mn[:, k - 6:k], axis=1)
+            dv = np.nanmin(vv[:, k:k + 2], axis=1) - np.nanmedian(vv[:, k - 6:k], axis=1)
         hand = fields.hand_mean_m.to_numpy()
-        low, high = hit & (hand <= 1), hit & (hand >= 3)
-        out.update({"ian_fields_200mm": int(hit.sum()), "ian_dmndwi_lowhand": float(np.nanmedian(dm[low])),
-                    "ian_dmndwi_highhand": float(np.nanmedian(dm[high])), "ian_dvv_lowhand": float(np.nanmedian(dv[low])),
-                    "ian_dvv_highhand": float(np.nanmedian(dv[high])), "ian_n_low": int(low.sum()),
-                    "ian_n_high": int(high.sum())})
-    mname = pd.Timestamp(2001, 1, 1)
-    txt = ("Statewide median NDVI reaches its minimum in {mmin} and its maximum in {mmax}, consistent with the dormant "
-           "season of warm-season grasses after winter frosts and the spring dry season, and with growth during the "
-           "summer rains. At the end of the dry season (April--May) the field NDVI anomaly is positively correlated "
-           "with the 60-day rainfall anomaly ($r={r:.2f}$, $n={n}$ field-periods). Sentinel-1 VV backscatter is higher "
-           "in periods with at least 25\\,mm of rain than in dry periods for {vf:.0f}\\,\\% of fields (median difference "
-           "{dv:.1f}\\,dB), as expected from wetter soil and canopy.").format(
+        county = fields.county.to_numpy()
+        classes = {"le1": hand <= 1, "1to3": (hand > 1) & (hand < 3), "ge3": hand >= 3}
+        out.update({"ian_rain_window": f"{times[k - 1]:%d %b}--{times[k] + pd.Timedelta(days=4):%d %b %Y}",
+                    "ian_fields_200mm": int(hit.sum())})
+        rng = np.random.default_rng(7)
+        for nm, c in classes.items():
+            for var, d in (("dmndwi", dm), ("dvv", dv)):
+                sel = hit & c & np.isfinite(d)
+                x, cl = d[sel], pd.factorize(county[sel])[0]
+                out[f"ian_n_{nm}"] = int((hit & c).sum())
+                out[f"ian_{var}_n_{nm}"] = int(sel.sum())
+                if sel.sum() < 10:
+                    continue
+                q = np.percentile(x, [25, 50, 75])
+                meds = []
+                for _ in range(B):                                   # resample counties (spatially clustered rain)
+                    w = M_cluster_weights(cl, rng)
+                    o = np.argsort(x)
+                    cw = np.cumsum(w[o])
+                    meds.append(x[o][np.searchsorted(cw, cw[-1] / 2)])
+                out.update({f"ian_{var}_{nm}_median": float(q[1]), f"ian_{var}_{nm}_q25": float(q[0]),
+                            f"ian_{var}_{nm}_q75": float(q[2]),
+                            f"ian_{var}_{nm}_lo": float(np.percentile(meds, 2.5)),
+                            f"ian_{var}_{nm}_hi": float(np.percentile(meds, 97.5))})
+    txt = ("Statewide median NDVI reaches its minimum in {mmin} and its maximum in {mmax}. At the end of the dry season "
+           "(April--May) the anomaly of observed NDVI is correlated with the 60-day rainfall anomaly ($r={r:.2f}$, "
+           "$n={n}$ field-periods, not independent). Sentinel-1 VV backscatter is higher in periods with at least "
+           "25\\,mm of rain than in periods with at most 1\\,mm for {vf:.0f}\\,\\% of fields (median difference "
+           "{dv:.1f}\\,dB).").format(
         mmin=pd.Timestamp(2001, out["ndvi_month_min"], 1).strftime("%B"),
         mmax=pd.Timestamp(2001, out["ndvi_month_max"], 1).strftime("%B"), r=r_drought,
         n=f"{ok.sum():,}".replace(",", "\\,"), vf=100 * out["vv_wet_gt_dry_frac"], dv=out["vv_wet_minus_dry_db_median"])
-    if "ian_fields_200mm" in out:
-        txt += (" After Hurricane Ian, among the {n} fields that received at least 200\\,mm in two days, fields with a "
-                "height above the nearest drainage of 1\\,m or less showed a median MNDWI increase of {ml:.2f} against "
-                "{mh:.2f} for fields 3\\,m or more above drainage, and a VV change of {vl:.1f} against {vh:.1f}\\,dB, "
-                "the signature of standing water on low-lying pastures (Fig.~\\ref{{fig:events}}).").format(
-            n=out["ian_fields_200mm"], ml=out["ian_dmndwi_lowhand"], mh=out["ian_dmndwi_highhand"],
-            vl=out["ian_dvv_lowhand"], vh=out["ian_dvv_highhand"])
+    if "ian_dmndwi_le1_median" in out and "ian_dmndwi_ge3_median" in out:
+        g = lambda v, c, nd_: ("{:.{p}f} (IQR {:.{p}f} to {:.{p}f}; 95\\,\\% interval of the median {:.{p}f} to "
+                               "{:.{p}f}; $n={}$)").format(out[f"ian_{v}_{c}_median"], out[f"ian_{v}_{c}_q25"],
+                                                          out[f"ian_{v}_{c}_q75"], out[f"ian_{v}_{c}_lo"],
+                                                          out[f"ian_{v}_{c}_hi"],
+                                                          f"{out[f'ian_{v}_n_{c}']:,}".replace(",", "\\,"), p=nd_)
+        txt += (" Hurricane Ian brought at least 200\\,mm in {win} to {n} fields. Among them, the change of observed "
+                "MNDWI after landfall was {ml} for fields with HAND of 1\\,m or less, {mm} for 1--3\\,m and {mh} for "
+                "3\\,m or more; the change of VV was {vl}, {vm} and {vh}\\,dB (Fig.~\\ref{{fig:events}}).").format(
+            win=out["ian_rain_window"], n=f"{out['ian_fields_200mm']:,}".replace(",", "\\,"),
+            ml=g("dmndwi", "le1", 2), mm=g("dmndwi", "1to3", 2), mh=g("dmndwi", "ge3", 2),
+            vl=g("dvv", "le1", 1), vm=g("dvv", "1to3", 1), vh=g("dvv", "ge3", 1))
     return out, txt
+
+
+def M_cluster_weights(codes, rng):
+    from fpcube.benchmark.models import _cluster_weights
+    return _cluster_weights(codes, rng)
 
 
 def quality(rel, cube, fields):
     """Known limits of the dynamic layers, stated with their size: interpolation, unobserved fields, radar orbit
-    mixing, saturated NDVI, provisional PRISM."""
+    mixing within a period and orbit changes between consecutive observed periods, saturated NDVI, provisional
+    PRISM, multipart fields."""
     from fpcube.cube import period_index
     nd, gf, no = cube.ndvi.values, cube.gap_filled.values, cube.n_optical_obs.values
     obs = no > 0
@@ -185,35 +249,114 @@ def quality(rel, cube, fields):
                   for p in (rel / "radar_observations").glob("*.parquet"))
     r["k"] = period_index(pd.to_datetime(r.date))
     g = r.groupby(["fid", "k"])
+    # orbit set of each observed period, compared with the field's previous observed period
+    sets = g.relative_orbit.agg(lambda x: tuple(sorted(set(x)))).reset_index().sort_values(["fid", "k"])
+    prev = sets.groupby("fid").relative_orbit.shift(1)
+    has_prev = prev.notna()
+    changed = (sets.relative_orbit != prev)[has_prev]
+    single = sets.relative_orbit.map(len) == 1
+    changed_single = (sets.relative_orbit != prev)[has_prev & single & prev.map(lambda x: isinstance(x, tuple)
+                                                                               and len(x) == 1)]
     p_ = sorted((config.RAW / "prism" / "ppt").glob("prism_ppt_*.tif"))[-1]
     with rasterio.open(p_) as s_:
         got = s_.tags().get("retrieved")
     got = pd.Timestamp(got) if got else pd.Timestamp(p_.stat().st_mtime, unit="s").normalize()
+    parts = fields.geometry.apply(lambda x: len(x.geoms) if x.geom_type == "MultiPolygon" else 1)
+    minor = fields.geometry.apply(lambda x: 0.0 if x.geom_type != "MultiPolygon"
+                                  else sum(sorted(q.area for q in x.geoms)[:-1]) / 1e4)
     stats = {"interpolated_frac": float(gf.sum() / np.isfinite(nd).sum()),
              "n_no_observations": int(fields.flag_no_observations.sum()),
              "n_no_optical": int(fields.flag_no_optical.sum()),
              "radar_mixed_orbit_frac": float((g.relative_orbit.nunique() > 1).mean()),
              "radar_mixed_direction_frac": float((g.orbit_state.nunique() > 1).mean()),
+             "radar_orbit_change_consecutive_frac": float(changed.mean()),
+             "radar_orbit_change_consecutive_single_frac": float(changed_single.mean()),
              "ndvi_saturated_frac": float((obs & (np.abs(nd) >= 0.999)).sum() / obs.sum()),
              "prism_retrieved": str(got.date()),
-             "prism_provisional_from": str((got - pd.DateOffset(months=6)).date())}
+             "prism_provisional_from": str((got - pd.DateOffset(months=6)).date()),
+             "n_multipart_fields": int((parts > 1).sum()),
+             "multipart_area_share": float(fields.area_ha[parts > 1].sum() / fields.area_ha.sum()),
+             "minor_parts_ha": float(minor.sum()),
+             "n_fields_minor_part_ge_2ha": int((minor >= 2).sum())}
     sat = 100 * stats["ndvi_saturated_frac"]
-    txt = ("{gf:.0f}\\,\\% of the optical values in the cube are interpolated rather than observed (flag "
-           "\\texttt{{gap\\_filled}}). {nn} fields have no optical or radar observation at all and {nr} more have radar only; "
+    txt = ("{nn} fields have no optical or radar observation at all and {nr} more have radar only; "
            "they are narrow fields in which no pixel remains after the inward buffers, kept in the release and flagged "
            "(\\texttt{{flag\\_no\\_observations}}, \\texttt{{flag\\_no\\_optical}}). {mo:.1f}\\,\\% of the radar composites "
-           "combine acquisitions from more than one relative orbit ({md:.1f}\\,\\% mix ascending and descending passes), so "
-           "the incidence angle varies within these periods; the per-acquisition table keeps the orbit of every value. "
-           "Because indices are computed per pixel and limited to $[-1, 1]$, NDVI composites reach $\\pm 1$ in "
-           "{sat} of the observed cells. PRISM daily values become stable about six months after the date; the record "
-           "was retrieved on {got}, so values after {prov} are provisional and may be revised in later PRISM releases.").format(
-        gf=100 * stats["interpolated_frac"], nn=fmt_int(stats["n_no_observations"]),
+           "combine acquisitions from more than one relative orbit ({md:.1f}\\,\\% mix ascending and descending passes), "
+           "and the set of relative orbits differs from the field's previous observed period in {oc:.0f}\\,\\% of the "
+           "composites, so the incidence angle varies within and between periods; the per-acquisition table keeps the "
+           "orbit of every value. Because indices are computed per pixel and limited to $[-1, 1]$, NDVI composites reach "
+           "$\\pm 1$ in {sat} of the observed cells. {nmp} fields ({mps:.0f}\\,\\% of the field area) consist of more than "
+           "one 4-connected part, because a pasture patch crossing a parcel boundary can split the part inside one "
+           "parcel; the smaller parts total {mha} ha (\\texttt{{n\\_parts}}). PRISM daily values become stable about "
+           "six months after the date; the record was retrieved on {got}, so values after {prov} are provisional and may "
+           "be revised in later PRISM releases.").format(
+        nn=fmt_int(stats["n_no_observations"]),
         nr=fmt_int(stats["n_no_optical"] - stats["n_no_observations"]),
         mo=100 * stats["radar_mixed_orbit_frac"], md=100 * stats["radar_mixed_direction_frac"],
+        oc=100 * stats["radar_orbit_change_consecutive_frac"],
         sat=(f"{sat:.3f}\\,\\%" if sat >= 0.001 else "fewer than 0.001\\,\\%"),
+        nmp=fmt_int(stats["n_multipart_fields"]), mps=100 * stats["multipart_area_share"],
+        mha=fmt_int(int(round(stats["minor_parts_ha"], -2))),
         got=pd.Timestamp(stats["prism_retrieved"]).strftime("%-d %B %Y"),
         prov=pd.Timestamp(stats["prism_provisional_from"]).strftime("%-d %B %Y"))
     return stats, txt
+
+
+SIZE_BINS = [2, 5, 20, 100, np.inf]
+
+
+def quality_by_stratum(cube, fields, counts):
+    """Observed, interpolated and empty shares of field x period cells and usable optical days per year, by tier
+    and field size, with the dry (October-May) and wet (June-September) seasons separately."""
+    obs = cube.n_optical_obs.values > 0
+    gf = cube.gap_filled.values
+    wet = np.isin(pd.DatetimeIndex(cube.time.values).month, [6, 7, 8, 9])
+    size = pd.cut(fields.area_ha, SIZE_BINS, right=False,
+                  labels=["2--5 ha", "5--20 ha", "20--100 ha", "$\\geq$100 ha"])
+    days = counts.reindex(fields.fid).mean(axis=1).to_numpy()
+    rows = []
+    frame = pd.DataFrame({"tier": fields.tier.to_numpy(), "size": np.asarray(size)}).assign(
+        size=lambda x: pd.Categorical(x["size"], categories=size.cat.categories, ordered=True))
+    for (tier, sz), g in frame.groupby(["tier", "size"], observed=True, sort=True):
+        i = g.index.to_numpy()
+        rows.append({"tier": tier, "size": sz, "n_fields": len(i),
+                     "observed_dry": obs[i][:, ~wet].mean(), "observed_wet": obs[i][:, wet].mean(),
+                     "interpolated": gf[i].mean(), "empty": 1 - obs[i].mean() - gf[i].mean(),
+                     "usable_days_per_year_median": float(np.median(days[i])),
+                     "no_optical_fields": int(fields.flag_no_optical.to_numpy()[i].sum())})
+    return pd.DataFrame(rows)
+
+
+def delineation_accounting(fields):
+    """Area and units after each step of the delineation (from fields.build's delineation_stats.json) and the woody
+    wetland area that the woody screen did not remove (CDL class 190 is not among the screened classes)."""
+    st = json.loads((config.INTERIM / "fields" / "delineation_stats.json").read_text())
+    lab_p = config.INTERIM / "fields" / "field_labels.tif"
+    out = {"steps": [
+        {"step": "Persistent pasture (CDL 176 or 37 in >= 6 of 10 years, 2016-2025)", "area_ha": st["persistent_pasture_ha"]},
+        {"step": "Removed: woody (CDL 141, 142, 143, 152) in >= 2 of 2012-2016", "area_ha": -st["removed_by_woody_screen_ha"]},
+        {"step": "Removed: outside any parcel of the two parcel layers",
+         "area_ha": -(st["kept_pasture_ha"] - st["kept_in_grazing_parcels_ha"])},
+        {"step": "Removed: parts smaller than 2 ha after the split by parcel",
+         "area_ha": -(st["kept_in_grazing_parcels_ha"] - st["in_fields_ha"])},
+        {"step": "Fields", "area_ha": st["in_fields_ha"], "n": st["n_fields"]}]}
+    if lab_p.exists():
+        with rasterio.open(lab_p) as s_:
+            lab = s_.read(1)
+        w = np.zeros(lab.shape, np.uint8)
+        for y in config.WOODY_SCREEN_YEARS:
+            with rasterio.open(config.RAW / "cdl" / f"CDL_{y}_{config.FLORIDA_FIPS}.tif") as s_:
+                w += np.isin(s_.read(1), config.CDL_WETLAND_WOODY)
+        inf = lab > 0
+        px = st["pixel_ha"]
+        nf = np.bincount(lab[inf & (w >= 2)], minlength=lab.max() + 1)[1:]
+        tot = np.bincount(lab[inf], minlength=lab.max() + 1)[1:]
+        out.update({"woody_wetland_2plus_ha": float((inf & (w >= 2)).sum() * px),
+                    "woody_wetland_2plus_share": float((inf & (w >= 2)).sum() / inf.sum()),
+                    "woody_wetland_any_ha": float((inf & (w >= 1)).sum() * px),
+                    "n_fields_woody_wetland_ge50pct": int((nf / np.maximum(tot, 1) >= 0.5).sum())})
+    return out
 
 
 NEIGHBOUR_DAYS = 16      # window for comparing a screened record with the field's used records
@@ -286,6 +429,7 @@ def fmt_int(x):
 
 def main(version="v1.0"):
     import xarray as xr
+    from fpcube import provenance
     rel = config.RELEASE / version
     vdir = rel / "validation"
     vdir.mkdir(exist_ok=True)
@@ -295,24 +439,31 @@ def main(version="v1.0"):
     wc = pd.read_csv(wc_p) if wc_p.exists() else worldcover(fields)
     wc.to_csv(wc_p, index=False)
     dstats, dtxt = delineation_text(wc, fields)
-    cstats, ctxt, py, ry = coverage(rel, cube, fields)
-    pd.DataFrame({"optical_clear_per_field": py, "radar_per_field": ry}).to_csv(vdir / "coverage_by_year.csv")
+    cstats, ctxt, py, ry, counts = coverage(rel, cube, fields)
+    pd.DataFrame({"usable_optical_days_median_field": py, "radar_days_median_field": ry}).to_csv(
+        vdir / "coverage_by_year.csv")
+    strata = quality_by_stratum(cube, fields, counts)
+    strata.to_csv(vdir / "quality_by_stratum.csv", index=False)
     pstats, ptxt = physical(cube, fields)
     qstats, qtxt = quality(rel, cube, fields)
+    acct = delineation_accounting(fields)
+    pd.DataFrame(acct["steps"]).to_csv(vdir / "delineation_accounting.csv", index=False)
     estats = evidence(rel, fields)
-    summary = {"stats": {"delineation": dstats, "coverage": cstats, "physical": pstats, "quality": qstats,
-                         "evidence": estats},
+    gc_all = 100 * (dstats["all"]["grassland"] + dstats["all"]["cropland"])
+    summary = {"code": provenance.info(),
+               "stats": {"delineation": dstats, "coverage": cstats, "physical": pstats, "quality": qstats,
+                         "accounting": acct, "evidence": estats},
                "ValidationFields": dtxt, "ValidationCoverage": ctxt, "ValidationPhysical": ptxt,
                "ValidationQuality": qtxt,
-               "ValidationSummary": ("that {g:.0f}\\,\\% of the field area is grassland or cropland in the independent "
-                                     "ESA WorldCover map, that a median field has {c:.0f} clear optical observations "
-                                     "per year, and that NDVI and backscatter respond to rainfall, drought and flooding "
-                                     "as expected").format(
-                   g=100 * (dstats["A"]["grassland"] + dstats["A"]["cropland"]),
-                   c=cstats["clear_per_field_year_median"])}
-    (vdir / "summary.json").write_text(json.dumps(summary, indent=2))
+               "ValidationSummary": ("that {g:.0f}\\,\\% of the field area (tier~A {gA:.0f}\\,\\%, tier~B {gB:.0f}\\,\\%) "
+                                     "is grassland or cropland in the independent ESA WorldCover map and that the median "
+                                     "field has {c:.0f} usable optical observations per year").format(
+                   g=gc_all, gA=100 * (dstats["A"]["grassland"] + dstats["A"]["cropland"]),
+                   gB=100 * (dstats["B"]["grassland"] + dstats["B"]["cropland"]),
+                   c=cstats["usable_days_per_field_year_median"])}
+    (vdir / "summary.json").write_text(json.dumps(summary, indent=2, default=float))
     return summary
 
 
 if __name__ == "__main__":
-    print(json.dumps(main(*sys.argv[1:])["stats"], indent=2))
+    print(json.dumps(main(*sys.argv[1:])["stats"], indent=2, default=float))

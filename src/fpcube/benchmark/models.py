@@ -47,11 +47,58 @@ def binary_metrics(y, s):
             "f1_at_prevalence": float(f1_score(y, s >= thr)), "prevalence": float(y.mean())}
 
 
-def ordinal_metrics(y, p):
-    from sklearn.metrics import balanced_accuracy_score, cohen_kappa_score, f1_score
-    return {"n": int(len(y)), "macro_f1": float(f1_score(y, p, average="macro")),
-            "balanced_accuracy": float(balanced_accuracy_score(y, p)),
-            "qwk": float(cohen_kappa_score(y, p, weights="quadratic")), "accuracy": float(np.mean(y == p))}
+def ordinal_metrics(y, p, w=None):
+    from sklearn.metrics import balanced_accuracy_score, cohen_kappa_score, f1_score, recall_score
+    out = {"n": int(len(y)), "macro_f1": float(f1_score(y, p, average="macro", labels=[0, 1, 2, 3], sample_weight=w,
+                                                        zero_division=0)),
+           "balanced_accuracy": float(balanced_accuracy_score(y, p, sample_weight=w)),
+           "qwk": float(cohen_kappa_score(y, p, weights="quadratic", sample_weight=w)),
+           "accuracy": float(np.average(y == p, weights=w))}
+    if w is None:
+        rec = recall_score(y, p, labels=[0, 1, 2, 3], average=None, zero_division=0)
+        for k, nm in enumerate(("none", "d0", "d1", "d2plus")):
+            out[f"recall_{nm}"] = float(rec[k])
+            out[f"n_{nm}"] = int((y == k).sum())
+    return out
+
+
+# ---------------------------------------------------------------- uncertainty
+def _cluster_weights(codes, rng):
+    """Bootstrap weight per sample: each cluster drawn with replacement (multinomial count per cluster)."""
+    n = codes.max() + 1
+    return rng.multinomial(n, np.full(n, 1 / n))[codes]
+
+
+def pigeonhole_bootstrap(stat, cl1, cl2, B=500, seed=SEED, q=(2.5, 97.5)):
+    """Percentile interval of stat(weights) under two-way cluster resampling (Owen 2007): clusters of cl1 (e.g.
+    counties) and of cl2 (e.g. dates) are resampled independently and a sample's weight is the product of its two
+    cluster counts. Respects dependence within a county over time and across counties on the same date."""
+    rng = np.random.default_rng(seed)
+    c1, c2 = pd.factorize(cl1)[0], pd.factorize(cl2)[0]
+    vals = [stat(_cluster_weights(c1, rng) * _cluster_weights(c2, rng)) for _ in range(B)]
+    return tuple(float(x) for x in np.nanpercentile(vals, q))
+
+
+def regression_ci(y, p, ref, cl1, cl2, B=500):
+    """95 % intervals of RMSE and MSE skill against ref, from per-(cl1, cl2) cell sums (fast for millions of rows)."""
+    ok = np.isfinite(y) & np.isfinite(p) & np.isfinite(ref)
+    d = pd.DataFrame({"a": np.asarray(cl1)[ok], "b": np.asarray(cl2)[ok], "e": (p[ok] - y[ok]) ** 2,
+                      "r": (ref[ok] - y[ok]) ** 2, "n": 1.0}).groupby(["a", "b"], sort=False).sum().reset_index()
+    E, R, N = d.e.to_numpy(), d.r.to_numpy(), d.n.to_numpy()
+    rmse = pigeonhole_bootstrap(lambda w: np.sqrt((w * E).sum() / (w * N).sum()), d.a, d.b, B)
+    skill = pigeonhole_bootstrap(lambda w: 1 - (w * E).sum() / (w * R).sum(), d.a, d.b, B)
+    return {"rmse_lo": rmse[0], "rmse_hi": rmse[1], "skill_lo": skill[0], "skill_hi": skill[1]}
+
+
+def median_ci(values, B=2000, seed=SEED):
+    """95 % percentile interval of the median of independent units (events) by resampling them."""
+    v = np.asarray(values, float)
+    v = v[np.isfinite(v)]
+    if len(v) < 2:
+        return (np.nan, np.nan)
+    rng = np.random.default_rng(seed)
+    m = np.median(v[rng.integers(0, len(v), (B, len(v)))], axis=1)
+    return tuple(float(x) for x in np.percentile(m, (2.5, 97.5)))
 
 
 # ---------------------------------------------------------------- gradient boosting
@@ -255,15 +302,19 @@ def predict_mil(model, bags, prepared=False, batch=64):
     return np.concatenate(out)
 
 
-def event_fold(X, y, event_ids, ev, kind, simple, threads):
-    """One leave-one-event-out fold of benchmark Task 2 (module level, so worker processes can import it)."""
+def grouped_validation(groups, test_mask, frac=0.15, seed=SEED):
+    """Validation set made of whole groups (events) drawn from the training groups."""
+    rng = np.random.default_rng(seed)
+    others = np.unique(groups[~test_mask])
+    va_g = rng.choice(others, max(1, int(round(frac * len(others)))), replace=False)
+    va = np.isin(groups, va_g) & ~test_mask
+    return ~test_mask & ~va, va
+
+
+def event_fold(X, y, event_ids, ev, threads):
+    """One leave-one-event-out LightGBM fit of benchmark Task 2 (module level, so worker processes can import
+    it). Validation events are whole events drawn from the training events. Returns the held-out scores."""
     te = event_ids == ev
-    rng = np.random.default_rng(SEED)
-    others = np.unique(event_ids[~te])
-    va_ev = rng.choice(others, max(1, int(0.15 * len(others))), replace=False)
-    va = np.isin(event_ids, va_ev) & ~te
-    tr = ~te & ~va
+    tr, va = grouped_validation(event_ids, te)
     gbm = lgbm_fit(X[tr], y[tr], X[va], y[va], objective="binary", num_threads=threads)
-    p = gbm.predict(X[te], num_threads=threads)
-    return [{"task": 2, "event_id": ev, "kind": kind, "model": m, **binary_metrics(y[te], q)}
-            for m, q in (("rule_dNDVI_dMNDWI", simple[te]), ("lightgbm", p))]
+    return ev, gbm.predict(X[te], num_threads=threads)

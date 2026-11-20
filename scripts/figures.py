@@ -104,27 +104,42 @@ def fig2(rel):
     rad = pd.concat(pd.read_parquet(p, columns=["fid", "date", "platform"])
                     for p in (rel / "radar_observations").glob("*.parquet"))
     opt = opt[opt.qa_use]
-    opt["year"] = pd.to_datetime(opt.date).dt.year
-    rad["year"] = pd.to_datetime(rad.date).dt.year
+    opt["day"] = pd.to_datetime(opt.date).dt.normalize()
+    opt = opt.drop_duplicates(["fid", "day", "sensor"])                 # one per field, day and sensor
+    opt["year"] = opt.day.dt.year
+    rad["day"] = pd.to_datetime(rad.date).dt.normalize()
+    rad = rad.drop_duplicates(["fid", "day"])
+    rad["year"] = rad.day.dt.year
     nf = len(pd.read_parquet(rel / "fields.parquet", columns=["fid"]))
-    fig, axs = plt.subplots(1, 3, figsize=(7.2, 2.4))
+    last = pd.Timestamp(config.END)
+    partial = last.year if last < pd.Timestamp(f"{last.year}-12-31") else None
+    fig, axs = plt.subplots(1, 3, figsize=(7.2, 2.5))
     o = opt.groupby(["year", "sensor"]).size().unstack(fill_value=0) / nf
     bottom = np.zeros(len(o))
-    for k, s in enumerate(o.columns):
-        axs[0].bar(o.index, o[s], bottom=bottom, color=C[k], width=0.8, edgecolor="white", linewidth=1,
-                   label={"L30": "Landsat 8/9 (L30)", "S30": "Sentinel-2 (S30)"}.get(s, s))
-        bottom += o[s].to_numpy()
-    axs[0].set_title("a  Clear HLS obs. per field")
+    for k, s_ in enumerate(o.columns):
+        axs[0].bar(o.index, o[s_], bottom=bottom, color=C[k], width=0.8, edgecolor="white", linewidth=1,
+                   hatch=["" if y != partial else "////" for y in o.index],
+                   label={"L30": "Landsat 8/9 (L30)", "S30": "Sentinel-2 (S30)"}.get(s_, s_))
+        bottom += o[s_].to_numpy()
+    axs[0].set_title("a  Usable HLS days per field")
+    axs[0].set_ylabel("Mean over fields")
     axs[0].legend(fontsize=6.5, ncol=2, loc="upper center", bbox_to_anchor=(0.5, -0.12))
     r = rad.groupby("year").size() / nf
-    axs[1].bar(r.index, r.values, color=C[0], width=0.8)
-    axs[1].set_title("b  Sentinel-1 acq. per field")
+    axs[1].bar(r.index, r.values, color=C[0], width=0.8, hatch=["" if y != partial else "////" for y in r.index],
+               edgecolor="white")
+    axs[1].set_title("b  Sentinel-1 days per field")
+    axs[1].set_ylabel("Mean over fields")
+    if partial:
+        for a, top in ((axs[0], o.sum(1).get(partial, 0)), (axs[1], r.get(partial, 0))):
+            a.annotate(f"to {last:%b}", (partial, top), xytext=(0, 2), textcoords="offset points", ha="center",
+                       va="bottom", fontsize=6, color=INK2)
     cube = xr.open_zarr(rel / "cube.zarr")
     has = (cube.n_optical_obs > 0).mean("field").to_series()
     m = has.groupby(has.index.month).mean()
     axs[2].bar(m.index, 100 * m.values, color=C[0], width=0.7)
     axs[2].set_xticks(range(1, 13), list("JFMAMJJASOND"))
     axs[2].set_title("c  Periods with optical data (%)")
+    axs[2].set_ylabel("Field-periods observed, all years")
     for a in axs[:2]:
         a.xaxis.set_major_locator(mpl.ticker.MultipleLocator(2))
         a.xaxis.set_major_formatter(mpl.ticker.FormatStrFormatter("%d"))
@@ -139,44 +154,70 @@ def fig5(rel):
     if not b or not (b / "task1_results.csv").exists():
         print("fig5: no benchmark yet"); return
     r1 = pd.read_csv(b / "task1_results.csv")
-    fig, axs = plt.subplots(1, 3, figsize=(7.2, 2.5))
+    fig, axs = plt.subplots(2, 2, figsize=(7.2, 5.6))
+    axs = axs.ravel()
     order = ["persistence", "climatology", "lightgbm", "transformer"]
+    lab = {"lightgbm": "LightGBM", "transformer": "Transformer", "persistence": "Persistence",
+           "climatology": "Climatology"}
     for k, m in enumerate(order):
         d = r1[(r1.split == "test") & (r1.model == m)].sort_values("horizon_days")
-        axs[0].plot(d.horizon_days, d.rmse, marker="o", ms=4, color=C[k],
-                    label={"lightgbm": "LightGBM"}.get(m, m.capitalize()))
+        x = d.horizon_days + (k - 1.5) * 0.8
+        axs[0].errorbar(x, d.rmse, yerr=[d.rmse - d.rmse_lo, d.rmse_hi - d.rmse], marker="o", ms=3.5, color=C[k],
+                        capsize=1.5, lw=1.2, label=lab[m])
     axs[0].set_xlabel("Lead time (days)"); axs[0].set_ylabel("NDVI RMSE")
-    axs[0].legend(fontsize=6.5, ncol=2, loc="upper center", bbox_to_anchor=(0.5, -0.28))
-    axs[0].set_title("a  Task 1 (temporal test)")
+    axs[0].set_xticks([15, 30, 45, 60])
+    axs[0].legend(fontsize=6.5, ncol=2)
+    axs[0].set_title("a  Task 1, RMSE (temporal test)")
+    for k, (m, sp, ls) in enumerate((("lightgbm", "test", "-"), ("transformer", "test", "-"),
+                                      ("lightgbm", "test_spatial", "--"), ("transformer", "test_spatial", "--"))):
+        d = r1[(r1.split == sp) & (r1.model == m)].sort_values("horizon_days")
+        x = d.horizon_days + (k - 1.5) * 0.8
+        axs[1].errorbar(x, 100 * d.skill_vs_ref, yerr=[100 * (d.skill_vs_ref - d.skill_lo),
+                                                       100 * (d.skill_hi - d.skill_vs_ref)],
+                        marker="o", ms=3.5, color=C[2 + (m == "transformer")], ls=ls, capsize=1.5, lw=1.2,
+                        label=f"{lab[m]}, {'temporal' if sp == 'test' else 'withheld counties'}")
+    axs[1].axhline(0, color=MUTED, lw=0.8)
+    axs[1].set_xlabel("Lead time (days)"); axs[1].set_ylabel("MSE skill vs climatology (%)")
+    axs[1].set_xticks([15, 30, 45, 60])
+    axs[1].legend(fontsize=6.3)
+    axs[1].set_title("b  Task 1, skill")
     if (b / "task2_results.csv").exists():
         r2 = pd.read_csv(b / "task2_results.csv")
-        r2 = r2[~r2.event_id.str.startswith("all_")]
+        r2 = r2[~r2.event_id.str.startswith("pooled_")]
         kinds = sorted(r2.kind.unique())
-        for k, m in enumerate(["rule_dNDVI_dMNDWI", "lightgbm"]):
-            d = r2[r2.model == m]
-            pos = [kinds.index(x) + (k - 0.5) * 0.3 for x in d.kind]
-            axs[1].scatter(pos, d.auroc, s=14, color=C[k], zorder=3,
-                           label={"lightgbm": "LightGBM"}.get(m, "ΔNDVI–ΔMNDWI rule"))
-        axs[1].set_xticks(range(len(kinds)), [k.replace("_", "\n") for k in kinds])
-        axs[1].axhline(0.5, color=MUTED, lw=0.8, ls="--")
-        axs[1].set_ylabel("AUROC (per event)")
-        axs[1].legend(fontsize=6.5, ncol=2, loc="upper center", bbox_to_anchor=(0.5, -0.28))
-        axs[1].set_title("b  Task 2 (leave-one-event-out)")
-    if (b / "task3_confusion.csv").exists():
-        cm = pd.read_csv(b / "task3_confusion.csv", index_col=0).to_numpy()
+        series = [("leave_one_event_out", "rule_dNDVI_dMNDWI", "ΔNDVI–ΔMNDWI rule"),
+                  ("leave_one_event_out", "lightgbm", "LightGBM, event out"),
+                  ("leave_one_kind_out", "lightgbm", "LightGBM, type out"),
+                  ("leave_one_kind_out", "transformer", "Transformer, type out")]
+        for k, (exp, m, l_) in enumerate(series):
+            d = r2[(r2.experiment == exp) & (r2.model == m)]
+            pos = np.array([kinds.index(x) for x in d.kind]) + (k - 1.5) * 0.18
+            axs[2].scatter(pos, d.auroc, s=6, color=C[k], alpha=0.6, linewidths=0, zorder=3)
+            med = d.groupby("kind").auroc.median().reindex(kinds)
+            axs[2].scatter(np.arange(len(kinds)) + (k - 1.5) * 0.18, med, marker="_", s=120, color=C[k], zorder=4,
+                           linewidths=2, label=l_)
+        axs[2].set_xticks(range(len(kinds)), [k.replace("_", "\n") for k in kinds])
+        axs[2].axhline(0.5, color=MUTED, lw=0.8, ls="--")
+        axs[2].set_ylabel("AUROC per event (bar: median)")
+        axs[2].legend(fontsize=6.0, ncol=2, loc="lower left")
+        axs[2].set_title("c  Task 2")
+    p3 = b / "task3_confusion_attention_mil.csv"
+    if p3.exists():
+        cm = pd.read_csv(p3, index_col=0).to_numpy()
         cmn = cm / cm.sum(1, keepdims=True)
-        axs[2].imshow(cmn, cmap=SEQ, vmin=0, vmax=1)
+        axs[3].imshow(cmn, cmap=SEQ, vmin=0, vmax=1)
         for i in range(4):
             for j in range(4):
-                axs[2].text(j, i, f"{cm[i, j]}", ha="center", va="center", fontsize=7,
+                axs[3].text(j, i, f"{cm[i, j]}", ha="center", va="center", fontsize=7,
                             color="white" if cmn[i, j] > 0.5 else INK)
-        lab = ["None", "D0", "D1", "D2+"]
-        axs[2].set_xticks(range(4), lab); axs[2].set_yticks(range(4), lab); axs[2].grid(False)
-        axs[2].set_xlabel("Predicted"); axs[2].set_ylabel("USDM")
-        axs[2].set_title("c  Task 3 (best model)")
+        cls = ["None", "D0", "D1", "D2+"]
+        axs[3].set_xticks(range(4), cls)
+        axs[3].set_yticks(range(4), [f"{c} ({100 * cmn[i, i]:.0f} %)" for i, c in enumerate(cls)])
+        axs[3].grid(False)
+        axs[3].set_xlabel("Predicted"); axs[3].set_ylabel("USDM class (recall)")
+        axs[3].set_title("d  Task 3, attention MIL (temporal test)")
     fig.tight_layout()
     save(fig, "fig5_benchmark")
-
 
 
 def _cube(rel):
@@ -243,8 +284,10 @@ def fig3(rel):
             for t in hurricane_days(hur):
                 ax.axvline(t, color=MUTED, lw=0.6, ls="--", zorder=0)
     series = axs[0, 0].get_legend_handles_labels()[0] + axs[1, 0].get_legend_handles_labels()[0]
-    handles = series + [mpl.patches.Patch(color=c_, label=l_) for c_, l_ in
-                        zip(["#f0efec", "#fab219", "#ec835a", "#d03b3b"], ["None", "D0", "D1", "D2+"])]
+    handles = series + [mpl.lines.Line2D([], [], color=MUTED, lw=0.6, ls="--",
+                                         label="hurricane landfall in Florida (anywhere in the state)")] + \
+        [mpl.patches.Patch(color=c_, label=l_) for c_, l_ in
+         zip(["#f0efec", "#fab219", "#ec835a", "#d03b3b"], ["None", "D0", "D1", "D2+"])]
     fig.legend(handles=handles, loc="lower center", ncol=4, fontsize=7,
                title="NDVI and backscatter; county drought (USDM, >= 50 % area)", title_fontsize=7,
                bbox_to_anchor=(0.5, -0.08))
@@ -261,64 +304,99 @@ def hurricane_days(hur):
 
 
 def _traj(a, k, rows, pre=12, post=12):
+    import warnings
+    warnings.simplefilter("ignore", RuntimeWarning)
     seg = a[rows][:, k - pre:k + post + 1]
     return np.arange(-pre, post + 1) * config.COMPOSITE_DAYS, np.nanmedian(seg, 0), np.nanpercentile(seg, 25, 0), \
         np.nanpercentile(seg, 75, 0)
 
 
 def fig4(rel):
-    """Field response to Hurricane Ian (2022) and the January 2018 freeze."""
+    """Field response to Hurricane Ian (2022) by HAND class, and to the January 2018 freeze. Optical values are
+    observed composites only (gap-filled values removed)."""
     if not rel or not (rel / "cube.zarr").exists():
         print("fig4: no release yet"); return
-    cube = _cube(rel)
+    from fpcube.benchmark.tasks import observed_only
+    cube = observed_only(_cube(rel)[["ndvi", "mndwi", "vv_db", "ppt_sum", "tmin_mean", "n_optical_obs"]].load())
     f = fields_table(rel)
     co = counties()
     times = pd.DatetimeIndex(cube.time.values)
     ppt = cube.ppt_sum.values
-    fig, axs = plt.subplots(2, 3, figsize=(7.2, 5.6), gridspec_kw={"width_ratios": [1.7, 1, 1]})
-    events = [("Hurricane Ian, 28 Sep 2022", pd.Timestamp("2022-09-28"), "vv_db", "ndvi"),
-              ("Freeze, 17 Jan 2018", pd.Timestamp("2018-01-17"), "ndvi", "vv_db")]
-    for r, (title, day, mapvar, other) in enumerate(events):
-        k = int(np.searchsorted(times, day))
-        if r == 0:
-            rain = np.nansum(ppt[:, k - 1:k + 1], axis=1)
-            pos, neg = rain >= 200, rain < 50
-            lab_pos, lab_neg = "≥ 200 mm in 10 d", "< 50 mm"
-        else:
-            tmin = cube.tmin_mean.values[:, k] if "tmin_mean" in cube else np.full(len(f), np.nan)
-            pos, neg = tmin <= 2, tmin >= 8
-            lab_pos, lab_neg = "5-day mean Tmin ≤ 2 °C", "≥ 8 °C"
-        a = cube[mapvar].values
+    fig, axs = plt.subplots(2, 3, figsize=(7.2, 5.8), gridspec_kw={"width_ratios": [1.7, 1, 1]})
+    # row 1: Ian
+    k = int(np.searchsorted(times, pd.Timestamp("2022-09-28")))
+    rain = np.nansum(ppt[:, k - 1:k + 1], axis=1)
+    hit = rain >= 200
+    hand = f.hand_mean_m.to_numpy()
+    groups = [(hit & (hand <= 1), C[0], "HAND ≤ 1 m"), (hit & (hand > 1) & (hand < 3), C[3], "HAND 1–3 m"),
+              (hit & (hand >= 3), C[1], "HAND ≥ 3 m")]
+    win = f"{times[k - 1]:%d %b}–{times[k] + pd.Timedelta(days=4):%d %b %Y}"
+    a = cube.vv_db.values
+    with np.errstate(all="ignore"):
+        import warnings
+        warnings.simplefilter("ignore", RuntimeWarning)
+        delta = np.nanmin(a[:, k:k + 2], 1) - np.nanmedian(a[:, k - 6:k], 1)
+    ax = axs[0, 0]
+    co.boundary.plot(ax=ax, color=AXIS, linewidth=0.25)
+    lim = np.nanpercentile(np.abs(delta), 95)
+    pts = f.geometry.representative_point()
+    ok = np.isfinite(delta)
+    ax.scatter(pts.x[ok], pts.y[ok], c=delta[ok], s=0.8, cmap=DIV, vmin=-lim, vmax=lim, rasterized=True, linewidths=0)
+    if hit.any():
+        ax.scatter(pts.x[hit], pts.y[hit], s=0.3, color=INK, rasterized=True, linewidths=0, alpha=0.25)
+    sm = mpl.cm.ScalarMappable(cmap=DIV, norm=mpl.colors.Normalize(-lim, lim))
+    fig.colorbar(sm, ax=ax, shrink=0.55, pad=0.01, label="ΔVV (dB), 10 d after − 30 d before")
+    ax.set_axis_off()
+    ax.set_title(f"a  Hurricane Ian, 28 Sep 2022\n(dark: ≥ 200 mm, {win})", fontsize=8)
+    for c_, (var, ylab) in enumerate((("mndwi", "MNDWI (observed)"), ("vv_db", "VV (dB)"))):
+        ax = axs[0, 1 + c_]
+        arr = cube[var].values
+        for rows, col, l_ in groups:
+            if rows.sum() < 10:
+                continue
+            x, m, lo, hi = _traj(arr, k, rows)
+            n_obs = np.isfinite(arr[rows][:, k:k + 3]).any(1).sum()
+            ax.fill_between(x, lo, hi, color=col, alpha=0.15, linewidth=0)
+            ax.plot(x, m, color=col, marker="o", ms=2, label=f"{l_} (n = {rows.sum():,}; observed after: {n_obs:,})")
+        ax.axvline(0, color=MUTED, lw=0.7, ls="--")
+        ax.set_xlabel("Days from landfall")
+        ax.set_ylabel(ylab)
+        ax.set_title("bc"[c_], fontsize=8)
+    axs[0, 1].legend(fontsize=6.0, loc="upper left", bbox_to_anchor=(0.0, -0.22), ncol=1,
+                     title="Fields with ≥ 200 mm; median and IQR", title_fontsize=6.0)
+    # row 2: freeze
+    k = int(np.searchsorted(times, pd.Timestamp("2018-01-17")))
+    tmin = cube.tmin_mean.values[:, k]
+    pos, neg = tmin <= 2, tmin >= 8
+    a = cube.ndvi.values
+    with np.errstate(all="ignore"):
         delta = np.nanmedian(a[:, k + 1:k + 4], 1) - np.nanmedian(a[:, k - 6:k], 1)
-        ax = axs[r, 0]
-        co.boundary.plot(ax=ax, color=AXIS, linewidth=0.25)
-        lim = np.nanpercentile(np.abs(delta), 95)
-        pts = f.geometry.representative_point()
-        ok = np.isfinite(delta)
-        ax.scatter(pts.x[ok], pts.y[ok], c=delta[ok], s=0.8, cmap=DIV,
-                   vmin=-lim, vmax=lim, rasterized=True, linewidths=0)
-        sm = mpl.cm.ScalarMappable(cmap=DIV, norm=mpl.colors.Normalize(-lim, lim))
-        fig.colorbar(sm, ax=ax, shrink=0.55, pad=0.01,
-                     label=f"Δ{'NDVI' if mapvar == 'ndvi' else 'VV (dB)'}, 15 d after vs 30 d before")
-        ax.set_axis_off()
-        ax.set_title(f"{'ad'[r]}  {title}", fontsize=8)
-        for c_, (var, lab) in enumerate(((mapvar, None), (other, None))):
-            ax = axs[r, 1 + c_]
-            arr = cube[var].values
-            for rows, col, l_ in ((pos, C[1], lab_pos), (neg, C[0], lab_neg)):
-                if rows.sum() < 10:
-                    continue
-                x, m, lo, hi = _traj(arr, k, rows)
-                ax.fill_between(x, lo, hi, color=col, alpha=0.18, linewidth=0)
-                ax.plot(x, m, color=col, label=f"{l_} (n = {rows.sum():,})")
-            ax.axvline(0, color=MUTED, lw=0.7, ls="--")
-            ax.set_xlabel("Days from event")
-            ax.set_ylabel("NDVI" if var == "ndvi" else "VV (dB)")
-            ax.set_title(f"{'bcef'[2 * r + c_]}", fontsize=8)
-            if c_ == 0:
-                ax.legend(fontsize=6.3, loc="upper left", bbox_to_anchor=(0.0, -0.22), ncol=1)
+    ax = axs[1, 0]
+    co.boundary.plot(ax=ax, color=AXIS, linewidth=0.25)
+    lim = np.nanpercentile(np.abs(delta), 95)
+    ok = np.isfinite(delta)
+    ax.scatter(pts.x[ok], pts.y[ok], c=delta[ok], s=0.8, cmap=DIV, vmin=-lim, vmax=lim, rasterized=True, linewidths=0)
+    sm = mpl.cm.ScalarMappable(cmap=DIV, norm=mpl.colors.Normalize(-lim, lim))
+    fig.colorbar(sm, ax=ax, shrink=0.55, pad=0.01, label="ΔNDVI, 15 d after − 30 d before")
+    ax.set_axis_off()
+    ax.set_title("d  Freeze, 17 Jan 2018", fontsize=8)
+    for c_, (var, ylab) in enumerate((("ndvi", "NDVI (observed)"), ("vv_db", "VV (dB)"))):
+        ax = axs[1, 1 + c_]
+        arr = cube[var].values
+        for rows, col, l_ in ((pos, C[1], "5-day mean Tmin ≤ 2 °C"), (neg, C[0], "≥ 8 °C")):
+            if rows.sum() < 10:
+                continue
+            x, m, lo, hi = _traj(arr, k, rows)
+            ax.fill_between(x, lo, hi, color=col, alpha=0.18, linewidth=0)
+            ax.plot(x, m, color=col, marker="o", ms=2, label=f"{l_} (n = {rows.sum():,})")
+        ax.axvline(0, color=MUTED, lw=0.7, ls="--")
+        ax.set_xlabel("Days from event")
+        ax.set_ylabel(ylab)
+        ax.set_title("ef"[c_], fontsize=8)
+    axs[1, 1].legend(fontsize=6.3, loc="upper left", bbox_to_anchor=(0.0, -0.22), ncol=1)
     fig.tight_layout()
     save(fig, "fig4_events")
+
 
 if __name__ == "__main__":
     ap = argparse.ArgumentParser()

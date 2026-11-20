@@ -1,7 +1,9 @@
 """Field delineation: persistent pasture (CDL) x grazing-land parcels (FDOR) -> field polygons.
 
-A field is a 4-connected patch of persistent-pasture pixels inside one grazing-land parcel, at least
-MIN_FIELD_HA in area. Persistent pasture: CDL Grass/Pasture or Other Hay in at least PASTURE_MIN_FRACTION
+A field is the part of a 4-connected patch of persistent-pasture pixels that lies inside one parcel, at least
+MIN_FIELD_HA in area. Patches are labelled before the split by parcel, so when a patch crosses a parcel boundary
+the part inside one parcel can itself be disconnected (connected only through the neighbouring parcel); such fields
+have n_parts > 1 (v1.0 keeps them whole, because the observation tables aggregate over the whole field). Persistent pasture: CDL Grass/Pasture or Other Hay in at least PASTURE_MIN_FRACTION
 of the PASTURE_YEARS; pixels woody in more than WOODY_MAX_YEARS of the WOODY_SCREEN_YEARS are removed
 (young pine stands are often mapped as pasture).
 
@@ -95,6 +97,38 @@ def assign_county(gdf, fips=FIPS):
     return gdf
 
 
+def part_attributes(gdf):
+    """Number of 4-connected parts of each field polygon and the share of its area in the largest part."""
+    def one(g):
+        if g.geom_type != "MultiPolygon":
+            return 1, 1.0
+        a = [p.area for p in g.geoms]
+        return len(a), max(a) / sum(a)
+    v = gdf.geometry.apply(one)
+    gdf["n_parts"] = v.map(lambda x: x[0]).astype("int16")
+    gdf["largest_part_frac"] = v.map(lambda x: round(x[1], 4)).astype("float32")
+    return gdf
+
+
+def add_part_attributes(paths):
+    """Add n_parts and largest_part_frac to existing fields tables (v1.0 was built before these columns)."""
+    import os
+    import shutil
+    import tempfile
+    for p in map(Path, paths):
+        g = gpd.read_parquet(p)
+        if "n_parts" in g:
+            continue
+        g = part_attributes(g)
+        cols = list(g.columns)
+        i = cols.index("lat") + 1
+        cols = cols[:i] + ["n_parts", "largest_part_frac"] + [c for c in cols[i:] if c not in ("n_parts", "largest_part_frac")]
+        tmp = Path(tempfile.mkdtemp(dir="/private/tmp")) / p.name
+        g[cols].to_parquet(tmp)
+        shutil.move(str(tmp), str(p))
+        print(p, int((g.n_parts > 1).sum()), "multipart fields", flush=True)
+
+
 def build(out_dir=None):
     out = Path(out_dir or config.INTERIM / "fields")
     out.mkdir(parents=True, exist_ok=True)
@@ -171,6 +205,7 @@ def build(out_dir=None):
     from shapely.geometry import shape
     gdf = gpd.GeoDataFrame({"fid": ids}, geometry=[shape(g) for g in geoms], crs=f"EPSG:{epsg}")
     gdf = gdf.dissolve("fid").reset_index()
+    gdf = part_attributes(gdf)
 
     # attributes from rasters
     n_px = np.bincount(lab.ravel(), minlength=nfield + 1)
@@ -200,8 +235,8 @@ def build(out_dir=None):
     gdf["flag_landuse_change"] = gdf[[f"pasture_frac_{y}" for y in years[-3:]]].mean(axis=1) < 0.5
     gdf = gdf.rename(columns={"DOR_UC": "dor_use_code", "AgTaxExempt": "ag_exempt"}).drop(columns=["pidx", "CO_NO"])
     cols = ["field_id", "fid", "tier", "county", "county_fips", "dor_use_code", "ag_exempt", "area_ha", "perimeter_m", "compactness",
-            "n_pixels", "n_interior_pixels", "pasture_years_mean", "lon", "lat", "flag_few_interior",
-            "flag_landuse_change"] + list(annual) + ["geometry"]
+            "n_pixels", "n_interior_pixels", "pasture_years_mean", "lon", "lat", "n_parts", "largest_part_frac",
+            "flag_few_interior", "flag_landuse_change"] + list(annual) + ["geometry"]
     gdf = gdf[cols].sort_values("fid")
     gdf.to_parquet(out / "fields.parquet")
 
@@ -228,4 +263,8 @@ def build(out_dir=None):
 
 
 if __name__ == "__main__":
-    build()
+    import sys
+    if sys.argv[1:2] == ["--add-part-attributes"]:
+        add_part_attributes(sys.argv[2:])
+    else:
+        build()

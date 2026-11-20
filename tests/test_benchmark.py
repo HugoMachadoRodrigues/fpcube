@@ -70,7 +70,7 @@ def test_task3_and_mil():
     u = T.task3_samples(pd.DataFrame(rows), f, ds)
     assert (u.y == 1).all()
     bags = T.task3_bags(u, f, ds)
-    assert all(b.shape[1] == 4 for b in bags)   # NDVI anomaly, NDMI, VV, 60-day rain
+    assert all(b.shape[1] == 4 for b in bags)   # NDVI anomaly, NDMI, VV, 30-day rain
     y = np.random.default_rng(0).integers(0, 4, len(bags))
     mil = M.train_mil(bags[:30], y[:30], bags[30:40], y[30:40], epochs=2)
     p = M.predict_mil(mil, bags[40:])
@@ -99,3 +99,74 @@ def test_metrics():
     assert M.ordinal_metrics(np.array([0, 1, 2, 3]), np.array([0, 1, 2, 3]))["qwk"] == 1.0
     r = M.regression_metrics(np.array([1.0, 2, 3]), np.array([1.0, 2, 3]), ref=np.array([2.0, 2, 2]))
     assert r["rmse"] == 0 and r["skill_vs_ref"] == 1
+
+
+def test_task1_no_target_crosses_split():
+    ds, f = synthetic()
+    s = T.task1_samples(T.observed_only(ds), f)
+    assert (T.year_split(s.target_end.dt.year.to_numpy())[s.split != "test_spatial"]
+            == s.split[s.split != "test_spatial"]).all()
+    assert s.attrs["n_dropped_crossing_split"] > 0
+
+
+def _gap_fill(ds):
+    """Fill optical gaps by linear interpolation in time, as the cube does (n_optical_obs keeps the observed cells)."""
+    out = ds.copy(deep=True)
+    for v in T.OPTICAL:
+        if v in out:
+            out[v] = out[v].interpolate_na("time", max_gap=None, limit=6, use_coordinate=False)
+    return out
+
+
+def test_inputs_are_causal():
+    """Changing observations after the issue date must not change any Task 1 input of that issue date, although
+    the gap filling of the cube spreads them backwards."""
+    ds, f = synthetic()
+    base = T.observed_only(_gap_fill(ds))
+    s = T.task1_samples(base, f)
+    s = s[s.t == s.t.iloc[len(s) // 2]].head(50)
+    t0 = int(s.t.iloc[0])
+    alt = ds.copy(deep=True)
+    for v in ["ndvi", "ndmi", "evi"]:
+        alt[v][:, t0:] = alt[v][:, t0:] + 0.3
+    leaky = _gap_fill(alt)
+    assert not np.allclose(np.nan_to_num(leaky.ndvi.values[:, t0 - 3:t0]),
+                           np.nan_to_num(_gap_fill(ds).ndvi.values[:, t0 - 3:t0]))     # the cube itself leaks
+    X0, _ = T.task1_features(base, f, s)
+    X1, _ = T.task1_features(T.observed_only(leaky), f, s)
+    pd.testing.assert_frame_equal(X0, X1)
+
+
+def test_observed_only_removes_filled_values():
+    ds, f = synthetic()
+    ds["n_optical_obs"][:, 5] = 0
+    assert np.isnan(T.observed_only(ds.copy(deep=True)).ndvi.values[:, 5]).all()
+
+
+def test_anomaly_cut_rule_gives_lowest_to_driest():
+    y = np.r_[np.zeros(70, int), np.ones(10, int), np.full(10, 2), np.full(10, 3)]
+    rule = T.anomaly_cut_rule(np.arange(100.0), y)
+    p = rule(np.arange(100.0))
+    assert np.bincount(p, minlength=4).tolist() == [70, 10, 10, 10]
+    assert (p[:10] == 3).all() and (p[-70:] == 0).all()
+
+
+def test_task3_window_ends_before_map():
+    ds, f = synthetic()
+    times = pd.DatetimeIndex(ds.time.values)
+    maps = pd.date_range("2018-01-02", periods=60, freq="7D")            # Tuesdays, mid-period on most weeks
+    u = pd.DataFrame([{"county_fips": c, "valid_start": d, "D0": 0.0, "D1": 0.0, "D2": 0.0, "D3": 0.0, "D4": 0.0}
+                      for c in f.county_fips.unique() for d in maps])
+    u = T.task3_samples(u, f, ds)
+    last_end = T.period_ends(times)[u.t - 1]
+    assert (last_end <= u.valid_start).all()
+    assert (T.period_ends(times)[np.minimum(u.t, len(times) - 1)] > u.valid_start).all()   # the latest such window
+    assert u.y_prev.notna().sum() > 0
+
+
+def test_cluster_bootstrap_interval():
+    rng = np.random.default_rng(1)
+    y = rng.standard_normal(4000)
+    p = y + 0.1 * rng.standard_normal(4000)
+    ci = M.regression_ci(y, p, np.zeros(4000), rng.integers(0, 40, 4000), rng.integers(0, 30, 4000), B=200)
+    assert ci["rmse_lo"] < 0.1 < ci["rmse_hi"] + 0.01 and ci["skill_lo"] > 0.95

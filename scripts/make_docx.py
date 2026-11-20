@@ -185,9 +185,10 @@ def front_matter(title, authors, affils, corr):
             f"::: {{custom-style=\"Correspondence\"}}\nCorrespondence to: {corr}\n:::\n\n")
 
 
-def main():
+def main(src="fpcube_essd.tex", out=None):
+    out = Path(out) if out else OUT
     BUILD.mkdir(exist_ok=True)
-    s = (MS / "fpcube_essd.tex").read_text()
+    s = (MS / src).read_text()
     s, title = pop(s, "title")
     s, authors = pop(s, "Author", 2)
     s, affils = pop(s, "affil")
@@ -239,13 +240,15 @@ def main():
     md = front_matter(title[0][1][0], [(int(o or 1), a) for o, a in authors],
                       [(int(o or 1), a) for o, a in affils], corr[0][1][0] if corr else "") + md
     (BUILD / "manuscript_word.md").write_text(md)
-    subprocess.run(["pandoc", "manuscript_word.md", "-f", "markdown", "-o", str(OUT), "--citeproc",
+    subprocess.run(["pandoc", "manuscript_word.md", "-f", "markdown", "-o", str(out), "--citeproc",
                     f"--bibliography={MS / 'references.bib'}", f"--csl={CSL}", f"--reference-doc={reference_doc()}",
                     "--number-sections", f"--resource-path={MS}:{BUILD}"], cwd=BUILD, check=True)
-    subprocess.run(["zip", "-q", "-d", str(OUT), "*/"], check=False, capture_output=True)
+    subprocess.run(["zip", "-q", "-d", str(out), "*/"], check=False, capture_output=True)
     shutil.rmtree(BUILD, ignore_errors=True)
-    print(OUT)
+    print(out)
 
 
 if __name__ == "__main__":
-    main()
+    import sys
+    # python scripts/make_docx.py [source.tex output.docx]  (default: the manuscript)
+    main(*sys.argv[1:3])

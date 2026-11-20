@@ -1,17 +1,33 @@
 """Benchmark tasks, fixed splits and evaluation for the Florida Pasture Cube.
 
-Task 1  Greenness forecasting: from the 60 days before an issue date (12 composites of NDVI, NDMI, VV, VH,
-        rainfall, temperature, VPD) plus static soil/terrain attributes, predict observed (not gap-filled) NDVI
-        15, 30, 45 and 60 days ahead. Splits: issue year 2016-2022 train, 2023-2024 validation, 2025-2026 test;
-        a held-out county group (spatial test) is removed from training and validation.
+Causal inputs: the cube fills optical gaps of up to 30 days by interpolating between the observations on either side,
+so a filled value before an issue date can depend on an observation after it. Benchmark inputs therefore never use
+gap-filled values: every optical variable is set to missing where the period has no observation
+(observed_only), and models receive the missing-value pattern (LightGBM natively, the deep models as a mask) plus
+the last observed NDVI and its age. Radar and PRISM values are never interpolated.
+
+Task 1  Greenness forecasting: from the 12 periods (60 days) before an issue date (observed optical composites of
+        NDVI, NDMI, EVI, radar VV and VH, PRISM rainfall, temperature and VPD) plus static soil/terrain attributes,
+        predict the observed NDVI composite 15, 30, 45 and 60 days ahead (the period starting 5h - 5 days after the
+        issue date, h = 3, 6, 9, 12). A sample needs at least MIN_OBS_IN observed NDVI composites in the 60 days.
+        Splits by year: 2016-2022 train, 2023-2024 validation, 2025-2026 test, applied to BOTH the issue date and
+        the end of the target period, so no target crosses a split boundary. A held-out county group (spatial test)
+        is removed from training and validation. Baselines: persistence (last observed NDVI before the issue date,
+        within the 60 days) and climatology (mean of the field's observed NDVI composites in the same 5-day period
+        of the year, 2016-2022). All models are scored on the same samples (those where climatology exists).
+        Skill = 1 - MSE(model) / MSE(climatology) (mean squared error skill score).
 Task 2  Event exposure detection: from the composites 30 days before to 30 days after an event date, decide
-        whether a field was exposed to the event. Reference labels come only from sources the inputs do not use
-        directly as labels: hurricane tracks (HURDAT2/NHC) with PRISM 3-day rainfall, PRISM extreme rainfall,
-        PRISM minimum temperature (freeze) and the US Drought Monitor (drought onset). Positives and negatives
-        share the event date. Split: leave-one-event-out.
-Task 3  Weakly supervised condition: from the composites of all fields in a county over the 4 weeks before
-        a US Drought Monitor map date, predict the county's drought class (none, D0, D1, D2 or worse).
-        Labels exist only per county and week. Splits as Task 1 (by year) plus a county-group test.
+        whether a field was exposed to the event. Reference labels come from sources the inputs do not contain:
+        hurricane tracks (HURDAT2/NHC) with PRISM 3-day rainfall, PRISM extreme rainfall, PRISM minimum temperature
+        (freeze) and the US Drought Monitor (drought onset); PRISM is not an input. Positives and negatives share
+        the event date. Two experiments, each with every model under the same protocol and validation events
+        held out as whole events: leave-one-event-out (rule, LightGBM) and leave-one-kind-out (rule, LightGBM,
+        transformer). Scores: AUROC per held-out event (median per kind) and pooled per kind.
+Task 3  Weakly supervised condition: from the observed composites of all fields in a county over the 6 periods
+        (30 days) that END on or before a US Drought Monitor map date, plus 30-day rainfall, predict the county's
+        drought class (none, D0, D1, D2 or worse). Labels exist only per county and week. Splits by year of the map
+        plus a county-group test. Baselines: majority class, last week's USDM class, NDVI-anomaly cut points with
+        class frequencies from training, LightGBM on bag statistics, attention MIL.
 """
 import numpy as np
 import pandas as pd
@@ -25,6 +41,23 @@ DYN = ["ndvi", "ndmi", "evi", "vv_db", "vh_db", "ppt_sum", "tmean_mean", "vpdmax
 STATIC = ["drainage_code", "flooding_code", "aws0_100_mm", "hand_mean_m", "twi_mean", "elev_mean_m",
           "wetland_frac", "area_ha"]
 SEED = 20261116
+MIN_OBS_IN = 2                         # observed NDVI composites needed in the 60 days before a Task 1 issue date
+OPTICAL = ("blue", "green", "red", "nir", "swir1", "swir2", "ndvi", "evi", "ndmi", "mndwi", "nbr", "ndvi_sd",
+           "water_frac")
+
+
+def observed_only(cube):
+    """Optical variables set to missing where the period has no observation (gap-filled values removed)."""
+    obs = cube["n_optical_obs"] > 0
+    for v in OPTICAL:
+        if v in cube:
+            cube[v] = cube[v].where(obs)
+    return cube
+
+
+def period_ends(times):
+    """Exclusive end of each 5-day period."""
+    return pd.DatetimeIndex(times) + pd.Timedelta(days=config.COMPOSITE_DAYS)
 
 
 def county_groups(fields, n_groups=5):
@@ -47,62 +80,87 @@ def year_split(year):
 
 
 # ---------------------------------------------------------------- Task 1
-def task1_samples(cube, fields, stride=6, max_per_field=None):
-    """Issue dates every `stride` composites; one sample per field x issue date with an observed target."""
+def task1_samples(cube, fields, stride=6):
+    """Issue dates every `stride` periods; one sample per field x issue date x horizon with an observed target and
+    at least MIN_OBS_IN observed NDVI composites in the lookback. Expects observed_only(cube)."""
     nd = cube["ndvi"].values
-    filled = cube["gap_filled"].values
-    nobs = cube["n_optical_obs"].values
-    observed = (nobs > 0) & ~filled
+    obs = np.isfinite(nd)
     T = nd.shape[1]
     times = pd.DatetimeIndex(cube.time.values)
     issues = np.arange(LOOKBACK, T - max(HORIZONS), stride)
     rows = []
     for t in issues:
-        ok_in = np.isfinite(nd[:, t - LOOKBACK:t]).mean(axis=1) >= 0.5
+        ok_in = obs[:, t - LOOKBACK:t].sum(axis=1) >= MIN_OBS_IN
         for h in HORIZONS:
-            ok = ok_in & observed[:, t + h - 1]
-            idx = np.nonzero(ok)[0]
+            idx = np.nonzero(ok_in & obs[:, t + h - 1])[0]
             rows.append(pd.DataFrame({"f": idx, "t": t, "h": h}))
     s = pd.concat(rows, ignore_index=True)
     s["issue_date"] = times[s.t]
+    s["target_end"] = period_ends(times)[s.t + s.h - 1] - pd.Timedelta(days=1)       # last day of the target period
     s["split"] = year_split(s.issue_date.dt.year.to_numpy())
+    crosses = s.split.to_numpy() != year_split(s.target_end.dt.year.to_numpy())
+    s = s[~crosses].copy()
     grp = county_groups(fields)
     s["county_group"] = fields.county.map(grp).to_numpy()[s.f]
     s.loc[s.county_group == 0, "split"] = s.loc[s.county_group == 0, "split"].map(
         {"train": "drop", "val": "drop", "test": "test_spatial"})
-    return s[s.split != "drop"].reset_index(drop=True)
+    s = s[s.split != "drop"].reset_index(drop=True)
+    s.attrs["n_dropped_crossing_split"] = int(crosses.sum())
+    return s
+
+
+def last_observed(nd, f, t, lookback=LOOKBACK):
+    """Last observed value of nd before period t (within lookback periods) and its age in days (issue date minus
+    the start of that period)."""
+    val = np.full(len(f), np.nan, np.float32)
+    age = np.full(len(f), np.nan, np.float32)
+    for k in range(1, lookback + 1):
+        x = nd[f, t - k]
+        m = np.isnan(val) & np.isfinite(x)
+        val[m], age[m] = x[m], k * config.COMPOSITE_DAYS
+    return val, age
 
 
 def task1_features(cube, fields, s):
     X = {}
+    f, t = s.f.to_numpy(), s.t.to_numpy()
     for v in DYN:
         a = cube[v].values
         for lag in range(1, LOOKBACK + 1, 2):
-            X[f"{v}_l{lag}"] = a[s.f.to_numpy(), (s.t - lag).to_numpy()]
+            X[f"{v}_l{lag}"] = a[f, t - lag]
     nd = cube["ndvi"].values
-    X["ndvi_mean_l12"] = np.nanmean(np.stack([nd[s.f, s.t - k] for k in range(1, LOOKBACK + 1)]), axis=0)
+    lb = np.stack([nd[f, t - k] for k in range(1, LOOKBACK + 1)])
+    with np.errstate(invalid="ignore"), __import__("warnings").catch_warnings():
+        __import__("warnings").simplefilter("ignore", RuntimeWarning)
+        X["ndvi_mean_l12"] = np.nanmean(lb, axis=0)
+    X["n_ndvi_obs_l12"] = np.isfinite(lb).sum(axis=0)
+    X["ndvi_last"], X["ndvi_last_age_days"] = last_observed(nd, f, t)
     X["doy_sin"] = np.sin(2 * np.pi * s.issue_date.dt.day_of_year / 365.25)
     X["doy_cos"] = np.cos(2 * np.pi * s.issue_date.dt.day_of_year / 365.25)
     X["horizon"] = s.h.to_numpy()
     for c in STATIC:
         if c in fields:
-            X[c] = fields[c].to_numpy()[s.f]
-    y = nd[s.f.to_numpy(), (s.t + s.h - 1).to_numpy()]
+            X[c] = fields[c].to_numpy()[f]
+    y = nd[f, t + s.h.to_numpy() - 1]
     return pd.DataFrame(X), y
 
 
 def task1_climatology(cube, s):
-    """Simple baseline: the field's mean observed NDVI for the same 5-day period of the year, train years only."""
+    """The field's mean observed NDVI composite for the same 5-day period of the year, 2016-2022 (expects
+    observed_only(cube), so gap-filled values do not enter)."""
     nd = cube["ndvi"].values
     times = pd.DatetimeIndex(cube.time.values)
     poy = np.asarray((times.day_of_year - 1) // config.COMPOSITE_DAYS)
     train = np.asarray(times.year <= 2022)
     nper = poy.max() + 1
     clim = np.full((nd.shape[0], nper), np.nan, np.float32)
-    for p in range(nper):
-        cols = np.nonzero(train & (poy == p))[0]
-        if len(cols):
-            clim[:, p] = np.nanmean(nd[:, cols], axis=1)
+    import warnings
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", RuntimeWarning)
+        for p in range(nper):
+            cols = np.nonzero(train & (poy == p))[0]
+            if len(cols):
+                clim[:, p] = np.nanmean(nd[:, cols], axis=1)
     target_t = (s.t + s.h - 1).to_numpy()
     return clim[s.f.to_numpy(), poy[target_t]]
 
@@ -227,15 +285,22 @@ def task2_samples(events, cube, neg_ratio=1.0, seed=SEED):
 
 
 def task2_features(cube, s, pre=6, post=6):
+    """Change features around the event date from observed composites only (expects observed_only(cube))."""
+    import warnings
     X = {}
-    for v in ("ndvi", "ndmi", "mndwi", "evi", "vv_db", "vh_db"):
-        a = cube[v].values
-        f, t = s.f.to_numpy(), s.t.to_numpy()
-        before = np.nanmean(np.stack([a[f, t - k] for k in range(1, pre + 1)]), axis=0)
-        after = np.nanmean(np.stack([a[f, t + k] for k in range(1, post + 1)]), axis=0)
-        mn = np.nanmin(np.stack([a[f, t + k] for k in range(0, post + 1)]), axis=0)
-        X[f"{v}_pre"], X[f"{v}_post"], X[f"{v}_delta"] = before, after, after - before
-        X[f"{v}_min_post_delta"] = mn - before
+    f, t = s.f.to_numpy(), s.t.to_numpy()
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", RuntimeWarning)
+        for v in ("ndvi", "ndmi", "mndwi", "evi", "vv_db", "vh_db"):
+            a = cube[v].values
+            B = np.stack([a[f, t - k] for k in range(1, pre + 1)])
+            A = np.stack([a[f, t + k] for k in range(1, post + 1)])
+            before, after = np.nanmean(B, axis=0), np.nanmean(A, axis=0)
+            mn = np.nanmin(np.stack([a[f, t + k] for k in range(0, post + 1)]), axis=0)
+            X[f"{v}_pre"], X[f"{v}_post"], X[f"{v}_delta"] = before, after, after - before
+            X[f"{v}_min_post_delta"] = mn - before
+            if v == "ndvi":
+                X["n_opt_pre"], X["n_opt_post"] = np.isfinite(B).sum(0), np.isfinite(A).sum(0)
     X["doy_sin"] = np.sin(2 * np.pi * pd.DatetimeIndex(cube.time.values[s.t]).day_of_year / 365.25)
     X["doy_cos"] = np.cos(2 * np.pi * pd.DatetimeIndex(cube.time.values[s.t]).day_of_year / 365.25)
     return pd.DataFrame(X)
@@ -258,12 +323,18 @@ def drought_classes(u):
     return np.select([u.D2 >= 50, u.D1 >= 50, u.D0 >= 50], [3, 2, 1], 0)
 
 
-def task3_samples(usdm, fields, cube):
+def task3_samples(usdm, fields, cube, window=6):
+    """County-weeks with the index t of the first period after the input window: the window is the `window`
+    periods [t - window, t) whose ends are all on or before the map date (USDM valid_start, the Tuesday the map
+    describes). 'y_prev' is the county's class on the previous weekly map (a baseline that is known at that date)."""
     times = pd.DatetimeIndex(cube.time.values)
-    u = usdm.copy()
+    u = usdm.sort_values(["county_fips", "valid_start"]).copy()
     u["y"] = drought_classes(u)
-    u["t"] = np.searchsorted(times, u.valid_start)
-    u = u[(u.t >= 6) & (u.t < len(times))]
+    prev = u.groupby("county_fips").y.shift(1)
+    gap = u.groupby("county_fips").valid_start.diff().dt.days
+    u["y_prev"] = prev.where(gap == 7)
+    u["t"] = np.searchsorted(period_ends(times), u.valid_start, side="right")
+    u = u[(u.t >= window) & (u.t <= len(times))]
     have = set(fields.county_fips) if "county_fips" in fields else set()
     u = u[u.county_fips.isin(have)]
     u["split"] = year_split(u.valid_start.dt.year.to_numpy())
@@ -276,33 +347,51 @@ def task3_samples(usdm, fields, cube):
 
 
 def ndvi_anomaly(cube):
-    """NDVI minus the field's 2016-2022 mean for the same period of year (z-score per field and period)."""
+    """NDVI minus the field's 2016-2022 mean for the same period of year, divided by its standard deviation
+    (z-score per field and period; with observed_only(cube) only observed composites enter)."""
+    import warnings
     nd = cube["ndvi"].values
     times = pd.DatetimeIndex(cube.time.values)
     poy = np.asarray((times.day_of_year - 1) // config.COMPOSITE_DAYS)
     train = np.asarray(times.year <= 2022)
     an = np.full_like(nd, np.nan)
-    for p in np.unique(poy):
-        cols = poy == p
-        ref = nd[:, cols & train]
-        mu, sd = np.nanmean(ref, axis=1), np.nanstd(ref, axis=1)
-        an[:, cols] = (nd[:, cols] - mu[:, None]) / np.where(sd > 0.01, sd, np.nan)[:, None]
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", RuntimeWarning)
+        for p in np.unique(poy):
+            cols = poy == p
+            ref = nd[:, cols & train]
+            mu, sd = np.nanmean(ref, axis=1), np.nanstd(ref, axis=1)
+            an[:, cols] = (nd[:, cols] - mu[:, None]) / np.where(sd > 0.01, sd, np.nan)[:, None]
     return an
 
 
 def task3_bags(u, fields, cube, window=6):
-    """For each county-week: matrix of field features (fields x features) over the 30 days before the map."""
+    """For each county-week: matrix of field features (fields x features) over the `window` periods before the map
+    (mean NDVI anomaly, mean NDMI, mean VV, rainfall sum over the same periods)."""
+    import warnings
     an = ndvi_anomaly(cube)
     ndmi = cube["ndmi"].values
     vv = cube["vv_db"].values
     ppt = cube["ppt_sum"].values if "ppt_sum" in cube else None
     fips = fields.county_fips.to_numpy()
     bags = []
-    for r in u.itertuples():
-        idx = np.nonzero(fips == r.county_fips)[0]
-        sl = slice(r.t - window, r.t)
-        feats = [np.nanmean(an[idx, sl], axis=1), np.nanmean(ndmi[idx, sl], axis=1), np.nanmean(vv[idx, sl], axis=1)]
-        if ppt is not None:
-            feats.append(np.nansum(ppt[idx, r.t - 12:r.t], axis=1))
-        bags.append(np.c_[tuple(feats)].astype(np.float32))
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", RuntimeWarning)
+        for r in u.itertuples():
+            idx = np.nonzero(fips == r.county_fips)[0]
+            sl = slice(r.t - window, r.t)
+            feats = [np.nanmean(an[idx, sl], axis=1), np.nanmean(ndmi[idx, sl], axis=1),
+                     np.nanmean(vv[idx, sl], axis=1)]
+            if ppt is not None:
+                feats.append(np.nansum(ppt[idx, sl], axis=1))
+            bags.append(np.c_[tuple(feats)].astype(np.float32))
     return bags
+
+
+def anomaly_cut_rule(m_train, y_train, n_class=4):
+    """Ordinal cut points on the county mean NDVI anomaly: the lowest anomalies go to the driest class, each class
+    receiving its training frequency (D2+ gets the lowest p(D2+) share, then D1, D0, none)."""
+    freq = np.bincount(y_train, minlength=n_class) / len(y_train)
+    q = np.cumsum(freq[::-1])[:-1]                    # p(D2+), p(D2+)+p(D1), p(D2+)+p(D1)+p(D0)
+    cuts = np.nanquantile(m_train, q)
+    return lambda x: (n_class - 1) - np.searchsorted(cuts, x, side="right")

@@ -1,6 +1,6 @@
 # fpcube — Florida Pasture Cube
 
-Builds and reads the **Florida Pasture Cube**: every persistent pasture field in Florida (about 81,000 fields) with a
+Builds and reads the **Florida Pasture Cube**: persistent pasture fields in Florida (about 81,000 fields) with a
 5-day time series from January 2016 to October 2026 of HLS optical reflectance and indices, Sentinel-1 backscatter,
 and PRISM weather. Each field also carries gNATSGO soil, 3DEP terrain (HAND, TWI), C-CAP wetlands, US Drought Monitor
 and NASS condition labels, hurricane tracks, and three benchmark tasks.
@@ -30,7 +30,11 @@ import xarray as xr, geopandas as gpd
 cube = xr.open_zarr("data/release/v1.0/cube.zarr")            # dims: field x time
 fields = gpd.read_parquet("data/release/v1.0/fields.parquet")  # one row per field, EPSG:5070
 ndvi = cube.ndvi.sel(field="FPC000123")
+observed = ndvi.where(cube.n_optical_obs.sel(field="FPC000123") > 0)   # without the interpolated values
 ```
+
+Gap-filled optical values interpolate towards the next observation, so they must not be used as inputs of a forecast
+(the benchmark drops them: `fpcube.benchmark.tasks.observed_only`).
 
 From the Zenodo files, the cube opens without unzipping:
 
@@ -63,11 +67,24 @@ and `python -m fpcube.validation`; the validation text states the retrieval date
 
 | Task | Input | Target | Split |
 |---|---|---|---|
-| 1 Greenness forecast | 60 days of composites + static | NDVI at +15/30/45/60 days | years 2016–22 / 23–24 / 25–26, plus held-out counties |
-| 2 Event exposure | ±30 days around an event | exposed or not (hurricane, extreme rain, freeze, drought onset) | leave one event out |
-| 3 County drought | fields of a county, 30 days | USDM class (none, D0, D1, D2+) | as Task 1 |
+| 1 Greenness forecast | 60 days of observed composites + static | observed NDVI at +15/30/45/60 days | years 2016–22 / 23–24 / 25–26 for issue date and target, plus held-out counties |
+| 2 Event exposure | ±30 days of observed composites around an event | exposed or not (hurricane, extreme rain, freeze, drought onset) | leave one event out; leave one event type out |
+| 3 County drought | fields of a county, 30 days ending before the map date | USDM class (none, D0, D1, D2+) | years, plus held-out counties |
 
-`python -m fpcube.benchmark.run` reproduces the baselines.
+`python -m fpcube.benchmark.run task1` (about 30 min on an M1 Max), then `python -m fpcube.benchmark.run task2 task3`.
+Each task writes `<task>_run_info.json` with the code version (`fpcube.provenance`). All models of a task are scored
+on the same samples; intervals come from two-way cluster bootstrap (county x date) in Tasks 1 and 3 and from
+resampling events in Task 2.
+
+## Checks and validation material
+
+- `python -m fpcube.validation v1.0`: validation tables and text, including the area accounting of the delineation
+  and quality by tier and field size.
+- `python scripts/validation_sample.py`: stratified points inside and outside the fields
+  (`validation/photo_sample.csv`, `.kml`) to label against high-resolution imagery.
+- `python scripts/audit/index_audit.py 50`: re-reads a sample of HLS scenes to count undefined and out-of-range
+  per-pixel indices (`data/audit/index_audit.json`).
+- `python -m fpcube.cube --rescreen v1.0`: re-applies the optical quality flags to the release tables.
 
 ## Publishing a version on Zenodo
 

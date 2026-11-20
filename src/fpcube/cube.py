@@ -3,7 +3,7 @@
 Calendar: 5-day periods starting config.COMPOSITE_ANCHOR (period k covers [anchor + 5k, anchor + 5k + 5) days).
 
 Optical composite (per field and period): observations are used (flag 'qa_use') when they have at least
-max(3 px, 30% of the field's pixels) clear ('qa_clear'), a geometric shift within 1 pixel ('qa_geometry'), all six
+max(3 px, 30% of the field's pixels) clear ('qa_clear'), a geometric shift within 1 pixel or not assessed ('qa_geometry'; 'qa_geometry_status' tells pass, fail and not_assessed apart), all six
 field-mean reflectances within [-0.01, 1] ('qa_range'; outside it are missed clouds above 1 and over-corrected
 atmosphere below -0.01, whose NDVI sits well above the field's neighbouring dates), and field-mean blue reflectance
 at most 0.25 ('qa_haze'; above it NDVI mostly drops below neighbouring dates: residual haze or thin cloud); the
@@ -127,16 +127,42 @@ def load_optical(lo=None, hi=None, start=None, end=None):
     return _load("optical", lo, hi, start, end)
 
 
+GEOMETRY_STATES = ("pass", "fail", "not_assessed")
+
+
 def screen_optical(d):
+    """Quality flags of each field x acquisition record. The geometric shift is estimated only when the window of
+    clear field pixels is at least 64 x 64 pixels with enough overlap with the tile reference; otherwise it is not
+    assessed. Such records are kept (qa_geometry True, as in v1.0) but 'qa_geometry_status' says 'not_assessed' and
+    'shift_px' is missing, so users can exclude them."""
     ok_clear = (d.n_clear_px >= np.maximum(3, 0.3 * d.n_field_px))
-    sh = np.hypot(d.shift_row.fillna(0), d.shift_col.fillna(0))
-    ok_geo = sh <= MAX_SHIFT_PX
+    sh = np.hypot(d.shift_row, d.shift_col)                     # NaN when the shift was not estimated
+    assessed = sh.notna()
+    status = np.where(~assessed, "not_assessed", np.where(sh <= MAX_SHIFT_PX, "pass", "fail"))
+    ok_geo = pd.Series(status != "fail", index=d.index)
     r = d[REFL_BANDS]
     ok_range = ((r >= REFL_RANGE[0]) & (r <= REFL_RANGE[1])).all(axis=1)
     ok_haze = d.blue <= MAX_BLUE
-    d = d.assign(qa_clear=ok_clear, qa_geometry=ok_geo, qa_range=ok_range, qa_haze=ok_haze,
-                 qa_use=ok_clear & ok_geo & ok_range & ok_haze, shift_px=sh)
+    d = d.assign(qa_clear=ok_clear, qa_geometry=ok_geo,
+                 qa_geometry_status=pd.Categorical(status, categories=GEOMETRY_STATES),
+                 qa_range=ok_range, qa_haze=ok_haze, qa_use=ok_clear & ok_geo & ok_range & ok_haze, shift_px=sh)
     return d
+
+
+def rescreen_release(version="v1.0"):
+    """Re-apply screen_optical to the release's optical tables (adds qa_geometry_status; the other flags and
+    therefore the cube are unchanged)."""
+    rel = config.RELEASE / version
+    for p in sorted((rel / "optical_observations").glob("*.parquet")):
+        d = pd.read_parquet(p)
+        before = d.qa_use.to_numpy().copy()
+        d = screen_optical(d.drop(columns=[c for c in ("qa_geometry_status",) if c in d]))
+        if not np.array_equal(before, d.qa_use.to_numpy()):
+            raise SystemExit(f"{p.name}: qa_use changed, the cube would need a rebuild")
+        tmp = p.with_suffix(".tmp")
+        d.to_parquet(tmp, index=False)
+        tmp.replace(p)
+        print(p.name, d.qa_geometry_status.value_counts(normalize=True).round(4).to_dict(), flush=True)
 
 
 def merge_tiles(d):
@@ -349,4 +375,8 @@ def build(version="v1.0"):
 
 
 if __name__ == "__main__":
-    print(build())
+    import sys
+    if sys.argv[1:2] == ["--rescreen"]:
+        rescreen_release(*sys.argv[2:3])
+    else:
+        print(build())
