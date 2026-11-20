@@ -86,7 +86,8 @@ def coverage(rel, cube, fields):
     """Observation counts. A usable optical observation is one field x acquisition day with qa_use (records of the
     same day from overlapping tiles or both sensors count once). Per-field counts include fields with none."""
     opt = pd.concat(pd.read_parquet(p, columns=["fid", "date", "sensor", "qa_clear", "qa_geometry",
-                                                    "qa_geometry_status", "qa_range", "qa_haze", "qa_use"])
+                                                    "qa_geometry_status", "shift_scope", "qa_range", "qa_haze",
+                                                    "qa_use"])
                     for p in sorted((rel / "optical_observations").glob("*.parquet")))
     rad = pd.concat(pd.read_parquet(p, columns=["fid", "date"]) for p in (rel / "radar_observations").glob("*.parquet"))
     full_years = [y for y in config.YEARS if pd.Timestamp(f"{y}-12-31") <= pd.Timestamp(config.END)]
@@ -114,6 +115,8 @@ def coverage(rel, cube, fields):
              "geom_fail_frac": float((gs == "fail").mean()),
              "geom_not_assessed_frac": float((gs == "not_assessed").mean()),
              "geom_not_assessed_frac_of_used": float((gs[opt.qa_use] == "not_assessed").mean()),
+             "geom_fields_frac": float((opt.shift_scope.astype(str) == "fields").mean()),
+             "geom_scene_frac": float((opt.shift_scope.astype(str) == "scene").mean()),
              "range_reject_frac": float((opt.qa_clear & ~opt.qa_range).mean()),
              "haze_reject_frac": float((opt.qa_clear & opt.qa_range & ~opt.qa_haze).mean()),
              "radar_days_per_field_year_median": float(rad_year.median()),
@@ -122,10 +125,11 @@ def coverage(rel, cube, fields):
              "cells_interpolated": float(filled.mean()),
              "cells_empty": float(1 - obs.mean() - filled.mean()),
              "interpolated_share_of_ndvi_values": float(filled.sum() / (obs.sum() + filled.sum()))}
-    txt = ("Of all field-level HLS records, {ct:.0f}\\,\\% passed the clear-pixel test; the geometric shift could be "
-           "estimated for {ga:.0f}\\,\\% of the records (it needs a window of at least 64 by 64 clear pixels) and exceeded "
-           "one pixel in {gr:.2f}\\,\\%; the {gn:.0f}\\,\\% not assessed are kept and marked "
-           "(\\texttt{{qa\\_geometry\\_status}}). Of the clear records, {rr:.2f}\\,\\% and {hr:.2f}\\,\\% were rejected for "
+    txt = ("Of all field-level HLS records, {ct:.0f}\\,\\% passed the clear-pixel test; the geometric shift was "
+           "estimated for {ga:.0f}\\,\\% of the records, {gf:.0f}\\,\\% over the clear field pixels of the granule and "
+           "{gsc:.0f}\\,\\% over a clear 512 by 512 block of the tile where that window was smaller than 64 by 64 pixels, "
+           "and exceeded one pixel in {gr:.2f}\\,\\%; the {gn:.1f}\\,\\% not assessed ({gnu:.1f}\\,\\% of the used "
+           "records) are kept and marked (\\texttt{{qa\\_geometry\\_status}}). Of the clear records, {rr:.2f}\\,\\% and {hr:.2f}\\,\\% were rejected for "
            "reflectance outside [$-0.01$, 1] or blue reflectance above 0.25; {cf:.0f}\\,\\% of all records were used. "
            "Counting one observation per field and acquisition day, the median field has {cm:.0f} usable optical "
            "observations per year (median over {fy}; yearly medians {cmin:.0f}--{cmax:.0f}, increasing as Landsat~9 "
@@ -135,7 +139,8 @@ def coverage(rel, cube, fields):
            "interpolated values are therefore {ish:.0f}\\,\\% of the NDVI values in the cube.").format(
         cf=100 * stats["clear_frac_of_all_obs"], ct=100 * stats["clear_test_frac"],
         ga=100 * (1 - stats["geom_not_assessed_frac"]), gr=100 * stats["geom_fail_frac"],
-        gn=100 * stats["geom_not_assessed_frac"],
+        gn=100 * stats["geom_not_assessed_frac"], gnu=100 * stats["geom_not_assessed_frac_of_used"],
+        gf=100 * stats["geom_fields_frac"], gsc=100 * stats["geom_scene_frac"],
         rr=100 * stats["range_reject_frac"], hr=100 * stats["haze_reject_frac"],
         cm=stats["usable_days_per_field_year_median"], fy=stats["full_years"].replace("-", "--"),
         cmin=per_year.min(), cmax=per_year.max(),
@@ -274,6 +279,41 @@ def freeze_and_condition(cube, fields, B=1000):
             out.update({f"freeze_{var}_{g}_median": float(q[1]), f"freeze_{var}_{g}_q25": float(q[0]),
                         f"freeze_{var}_{g}_q75": float(q[2]), f"freeze_{var}_{g}_lo": float(np.percentile(meds, 2.5)),
                         f"freeze_{var}_{g}_hi": float(np.percentile(meds, 97.5))})
+    # (e2) same fields, same calendar periods in the other years without a freeze in that period: the 2018 drop
+    # minus the field's usual change at that time of year separates freeze damage from winter dormancy
+    cold = groups["cold"]
+    poy = (times.day_of_year - 1) // config.COMPOSITE_DAYS
+    others = []
+    for yr in range(2016, 2026):
+        if yr == 2018:
+            continue
+        kk = np.nonzero((times.year == yr) & (poy == poy[k]))[0]
+        if not len(kk) or kk[0] < 6 or kk[0] + 4 > len(times):
+            continue
+        kk = kk[0]
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", RuntimeWarning)
+            dd = np.nanmedian(nd[:, kk + 1:kk + 4], 1) - np.nanmedian(nd[:, kk - 6:kk], 1)
+        dd[cube.tmin_mean.values[:, kk] <= 2] = np.nan            # that year was cold too: not a control
+        others.append(dd)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", RuntimeWarning)
+        usual = np.nanmedian(np.stack(others), 0)
+        n_years = np.isfinite(np.stack(others)).sum(0)
+    excess = d["dndvi"] - usual
+    sel = cold & np.isfinite(excess) & (n_years >= 3)
+    v, cl = excess[sel], pd.factorize(county[sel])[0]
+    o = np.argsort(v)
+    meds = []
+    for _ in range(B):
+        w = M_cluster_weights(cl, rng)[o]
+        cw = np.cumsum(w)
+        meds.append(v[o][np.searchsorted(cw, cw[-1] / 2)])
+    q = np.percentile(v, [25, 50, 75])
+    out.update({"freeze_excess_n": int(sel.sum()), "freeze_excess_median": float(q[1]),
+                "freeze_excess_q25": float(q[0]), "freeze_excess_q75": float(q[2]),
+                "freeze_excess_lo": float(np.percentile(meds, 2.5)), "freeze_excess_hi": float(np.percentile(meds, 97.5)),
+                "freeze_usual_median": float(np.nanmedian(usual[sel])), "freeze_excess_share_below": float(np.mean(v < 0))})
     # (f) NASS condition
     nass = pd.read_parquet(config.RAW / "labels" / "nass_fl_pasture_condition_weekly.parquet")
     nass["week_ending"] = pd.to_datetime(nass.week_ending)
@@ -309,15 +349,74 @@ def freeze_and_condition(cube, fields, B=1000):
                                            f"{out[f'freeze_{v}_n_{c}']:,}".replace(",", "\\,"), p=p_)
     txt = ("In the 5-day period starting {per}, {nc} fields had a mean minimum temperature of 2\\,$^\\circ$C or "
            "lower and {nm} fields one of 8\\,$^\\circ$C or higher. Over the following 15 days observed NDVI changed by "
-           "{dc} in the cold fields and by {dm} in the mild ones, and VV by {vc} and {vm}\\,dB. "
+           "{dc} in the cold fields and by {dm} in the mild ones, and VV by {vc} and {vm}\\,dB. In the same cold "
+           "fields and calendar periods of the other years without a freeze, NDVI changed by a median of {us:.2f}, so "
+           "the 2018 change minus the usual one was {ex:.2f} (IQR {eq1:.2f} to {eq3:.2f}; 95\\,\\% interval of the "
+           "median {elo:.2f} to {ehi:.2f}; $n={en}$; {eb:.0f}\\,\\% of fields below their usual change). "
            "Over {nw} weeks the statewide median anomaly of observed NDVI is correlated with the weekly NASS "
            "pasture condition index ($r={rr:.2f}$) and with the index after removing its mean for the week of year "
            "($r={ra:.2f}$; Spearman {rs:.2f}); weeks are serially correlated and the yearly values range from "
            "{ymin:.2f} to {ymax:.2f}.").format(
         per=out["freeze_period"], nc=f"{out['freeze_n_cold']:,}".replace(",", "\\,"),
         nm=f"{out['freeze_n_mild']:,}".replace(",", "\\,"), dc=g("dndvi", "cold", 2), dm=g("dndvi", "mild", 2),
-        vc=g("dvv", "cold", 1), vm=g("dvv", "mild", 1), nw=out["nass_weeks"], rr=out["nass_r_raw"],
+        vc=g("dvv", "cold", 1), vm=g("dvv", "mild", 1), us=out["freeze_usual_median"], ex=out["freeze_excess_median"],
+        eq1=out["freeze_excess_q25"], eq3=out["freeze_excess_q75"], elo=out["freeze_excess_lo"],
+        ehi=out["freeze_excess_hi"], en=f"{out['freeze_excess_n']:,}".replace(",", "\\,"),
+        eb=100 * out["freeze_excess_share_below"], nw=out["nass_weeks"], rr=out["nass_r_raw"],
         ra=out["nass_r_anom"], rs=out["nass_spearman_anom"], ymin=min(by_year.values()), ymax=max(by_year.values()))
+    return out, txt
+
+
+def ian_passes(rel, cube, fields, B=1000, drop_db=3.0):
+    """(g) Hurricane Ian on single Sentinel-1 passes instead of 5-day composites: VV change on relative orbit 48
+    between 20 Sep and 2 Oct 2022 (4 days after landfall) per field, and the same orbit's change between 27 Aug and
+    20 Sep as the change expected without the storm. Open water lowers C-band backscatter, so the share of fields
+    whose VV dropped by more than `drop_db` is compared by rain group (>= 200 mm or < 50 mm in the two periods
+    around landfall) and HAND class, with county-cluster intervals."""
+    import warnings
+    d = pd.read_parquet(rel / "radar_observations" / "2022.parquet", columns=["fid", "date", "relative_orbit", "vv_db"])
+    d = d[d.relative_orbit == 48]
+    w = d.assign(day=d.date.dt.strftime("%m-%d")).pivot_table(index="fid", columns="day", values="vv_db")
+    times = pd.DatetimeIndex(cube.time.values)
+    k = int(np.searchsorted(times, pd.Timestamp("2022-09-28")))
+    rain = np.nansum(cube.ppt_sum.values[:, k - 1:k + 1], axis=1)
+    f = pd.DataFrame({"fid": fields.fid.to_numpy(), "rain": rain, "hand": fields.hand_mean_m.to_numpy(),
+                      "county": fields.county.to_numpy()}).set_index("fid")
+    x = f.join(w[["08-27", "09-20", "10-02"]], how="inner")
+    x["post"], x["pre"] = x["10-02"] - x["09-20"], x["09-20"] - x["08-27"]
+    groups = {"hit_le1": (x.rain >= 200) & (x.hand <= 1), "hit_1to3": (x.rain >= 200) & (x.hand > 1) & (x.hand < 3),
+              "hit_ge3": (x.rain >= 200) & (x.hand >= 3), "ctrl": x.rain < 50}
+    rng = np.random.default_rng(5)
+    out = {"ian_pass_dates": "20 Sep and 2 Oct 2022 (relative orbit 48)", "ian_pass_drop_db": drop_db}
+    for g, m in groups.items():
+        s = x[m & x.post.notna() & x.pre.notna()]
+        cl = pd.factorize(s.county)[0]
+        a, b = (s.post < -drop_db).to_numpy(float), (s.pre < -drop_db).to_numpy(float)
+        sh = lambda w_, v: (w_ * v).sum() / w_.sum()
+        boot = []
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", RuntimeWarning)
+            for _ in range(B):
+                w_ = M_cluster_weights(cl, rng).astype(float)
+                boot.append((sh(w_, a), sh(w_, b), sh(w_, a) - sh(w_, b)))
+        boot = np.array(boot)
+        lo, hi = np.percentile(boot, [2.5, 97.5], axis=0)
+        out.update({f"ian_pass_n_{g}": int(len(s)), f"ian_pass_post_{g}": float(a.mean()),
+                    f"ian_pass_pre_{g}": float(b.mean()), f"ian_pass_post_{g}_lo": float(lo[0]),
+                    f"ian_pass_post_{g}_hi": float(hi[0]), f"ian_pass_diff_{g}": float(a.mean() - b.mean()),
+                    f"ian_pass_diff_{g}_lo": float(lo[2]), f"ian_pass_diff_{g}_hi": float(hi[2]),
+                    f"ian_pass_dvv_median_{g}": float(s.post.median())})
+    pc = lambda v: f"{100 * v:.1f}\\,\\%"
+    g_ = lambda g: ("{post} [{lo}, {hi}] of {n} fields, against {pre} between the two passes before the storm "
+                    "(difference {d} [{dlo}, {dhi}])").format(
+        post=pc(out[f"ian_pass_post_{g}"]), lo=pc(out[f"ian_pass_post_{g}_lo"]), hi=pc(out[f"ian_pass_post_{g}_hi"]),
+        n=f"{out[f'ian_pass_n_{g}']:,}".replace(",", "\\,"), pre=pc(out[f"ian_pass_pre_{g}"]),
+        d=pc(out[f"ian_pass_diff_{g}"]), dlo=pc(out[f"ian_pass_diff_{g}_lo"]), dhi=pc(out[f"ian_pass_diff_{g}_hi"]))
+    txt = ("On single Sentinel-1 passes of the same orbit, 4 days after Ian's landfall (20 Sep against 2 Oct 2022), VV "
+           "dropped by more than {db:.0f}\\,dB in {le1} among fields with at least 200\\,mm and HAND of 1\\,m or "
+           "less; in {m13} with HAND of 1--3\\,m; in {g3} with HAND of 3\\,m or more; and in {ct} among fields with "
+           "less than 50\\,mm.").format(db=drop_db, le1=g_("hit_le1"), m13=g_("hit_1to3"), g3=g_("hit_ge3"),
+                                          ct=g_("ctrl"))
     return out, txt
 
 
@@ -534,15 +633,16 @@ def main(version="v1.0"):
     strata.to_csv(vdir / "quality_by_stratum.csv", index=False)
     pstats, ptxt = physical(cube, fields)
     fstats, ftxt = freeze_and_condition(cube, fields)
+    istats, itxt = ian_passes(rel, cube, fields)
     qstats, qtxt = quality(rel, cube, fields)
     acct = delineation_accounting(fields)
     pd.DataFrame(acct["steps"]).to_csv(vdir / "delineation_accounting.csv", index=False)
     estats = evidence(rel, fields)
     gc_all = 100 * (dstats["all"]["grassland"] + dstats["all"]["cropland"])
     summary = {"code": provenance.info(),
-               "stats": {"delineation": dstats, "coverage": cstats, "physical": pstats, "events": fstats, "quality": qstats,
+               "stats": {"delineation": dstats, "coverage": cstats, "physical": pstats, "events": fstats, "ian_passes": istats, "quality": qstats,
                          "accounting": acct, "evidence": estats},
-               "ValidationFields": dtxt, "ValidationCoverage": ctxt, "ValidationPhysical": ptxt, "ValidationEvents": ftxt,
+               "ValidationFields": dtxt, "ValidationCoverage": ctxt, "ValidationPhysical": ptxt, "ValidationEvents": ftxt, "ValidationIanPasses": itxt,
                "ValidationQuality": qtxt,
                "ValidationSummary": ("that {g:.0f}\\,\\% of the field area (tier~A {gA:.0f}\\,\\%, tier~B {gB:.0f}\\,\\%) "
                                      "is grassland or cropland in the independent ESA WorldCover map and that the median "

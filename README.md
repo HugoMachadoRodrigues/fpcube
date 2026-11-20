@@ -84,7 +84,7 @@ resampling events in Task 2.
   (`validation/photo_sample.csv`, `.kml`) to label against high-resolution imagery.
 - `python scripts/audit/index_audit.py 50`: re-reads a sample of HLS scenes to count undefined and out-of-range
   per-pixel indices (`data/audit/index_audit.json`).
-- `python -m fpcube.cube --rescreen v1.0`: re-applies the optical quality flags to the release tables.
+- `python -m fpcube.sources.scene_shift` estimates the shift of granules whose field window was too small (scene level), and `python -m fpcube.cube --apply-scene-shift v1.0` brings it into the release (re-screened tables, recomposited fields).
 
 ## Publishing a version on Zenodo
 

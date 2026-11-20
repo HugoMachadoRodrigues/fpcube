@@ -117,9 +117,10 @@ Following Gebru et al. (2021), *Datasheets for datasets*.
   Sentinel-1 VV/VH, PRISM weather.
 - **Per field and acquisition:** long tables with clear-pixel counts, geometric shift, sensor, orbit; optical
   records carry quality flags (`qa_clear`, `qa_geometry`, `qa_range`, `qa_haze`) and `qa_use`, the records that
-  enter the composites. `qa_geometry_status` is `pass`, `fail` or `not_assessed`: the shift is estimated only
-  when the window of clear field pixels is at least 64 x 64 pixels; {geom_na} of the records were not assessed and
-  are kept (`qa_geometry` is True for them). Indices are computed per pixel and averaged over the field's clear
+  enter the composites. `qa_geometry_status` is `pass`, `fail` or `not_assessed`: the shift is estimated over the
+  window of clear field pixels when it is at least 64 x 64 pixels (`shift_scope` = `fields`), otherwise over a clear
+  512 x 512 block of the tile (`scene`, used when the correlation peak is at least 0.1); {geom_na} of the records
+  were not assessed (`none`) and are kept (`qa_geometry` is True for them). Indices are computed per pixel and averaged over the field's clear
   pixels; in v1.0 a pixel whose index is undefined (zero denominator) counts as 0 and values are clipped to
   [-1, 1] before averaging (rare: see the paper).
 - **Multipart fields.** {n_multi} fields have more than one 4-connected part (`n_parts`, `largest_part_frac`): a
@@ -245,7 +246,8 @@ def dictionary(rel):
               "Field-mean surface reflectance of the clear pixels (`blue` ... `swir2`, unitless), field-mean of per-pixel "
               "indices (`ndvi`, `evi`, `ndmi`, `mndwi`, `nbr`), `ndvi_sd`, `water_frac` (Fmask water bit), "
               "`n_clear_px`, `n_field_px`, `clear_frac`, `date` (UTC), `sensor`, `tile`, `item` (granule id), "
-              "`shift_row`, `shift_col` (30 m pixels, NaN = not estimated), `shift_peak`, `shift_px`, the quality "
+              "`shift_row`, `shift_col` (30 m pixels, NaN = not estimated), `shift_peak`, `shift_px`, `shift_scope` "
+              "(`fields`, `scene` or `none`: where the shift was estimated), the quality "
               "flags and `qa_use`.", "",
               "### radar_observations/YYYY.parquet (one row per field and Sentinel-1 acquisition)", "",
               "`vv_lin`, `vh_lin` (gamma0, linear, field mean over `n_px` pixels), `vv_db`, `vh_db`, `vh_vv_db`, "
@@ -264,7 +266,7 @@ def datasheet(rel):
                            n_a=int((f.tier == "A").sum()),
                            n_b=int((f.tier == "B").sum()), n_periods=len(t), start=t[0].date(),
                            end=(t[-1] + pd.Timedelta(days=config.COMPOSITE_DAYS - 1)).date(),
-                           geom_na=f"{100 * gna:.0f} %" if gna is not None else "some",
+                           geom_na=f"{100 * gna:.1f} %" if gna is not None else "some",
                            n_multi=int((f.n_parts > 1).sum()), n_wt_missing=int(f.water_table_min_cm.isna().sum()),
                            commit=code.get("commit", "?") + (" (with local changes)" if code.get(
                                "code_modified_since_commit") else ""),

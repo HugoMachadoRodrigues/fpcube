@@ -190,3 +190,19 @@ def test_cluster_bootstrap_interval():
     p = y + 0.1 * rng.standard_normal(4000)
     ci = M.regression_ci(y, p, np.zeros(4000), rng.integers(0, 40, 4000), rng.integers(0, 30, 4000), B=200)
     assert ci["rmse_lo"] < 0.1 < ci["rmse_hi"] + 0.01 and ci["skill_lo"] > 0.95
+
+
+def test_scene_shift_fills_only_unassessed_records():
+    base = dict(n_clear_px=50, n_field_px=60, blue=0.05, green=0.08, red=0.06, nir=0.3, swir1=0.2, swir2=0.1,
+                shift_peak=0.5)
+    d = pd.DataFrame([{**base, "item": "a", "shift_row": 0.2, "shift_col": 0.1},      # assessed on the fields
+                      {**base, "item": "b", "shift_row": np.nan, "shift_col": np.nan},  # scene says pass
+                      {**base, "item": "c", "shift_row": np.nan, "shift_col": np.nan},  # scene says fail
+                      {**base, "item": "d", "shift_row": np.nan, "shift_col": np.nan}]) # no scene estimate
+    scene = pd.DataFrame({"item": ["a", "b", "c"], "shift_row": [5.0, 0.3, 2.0], "shift_col": [0.0, 0.0, 0.0],
+                          "shift_peak": [0.4, 0.4, 0.4]})
+    s = C.screen_optical(d, scene)
+    assert s.shift_scope.tolist() == ["fields", "scene", "scene", "none"]
+    assert s.qa_geometry_status.tolist() == ["pass", "pass", "fail", "not_assessed"]
+    assert s.qa_use.tolist() == [True, True, False, True]
+    assert s.shift_row.iloc[0] == 0.2                      # the field-window estimate is never replaced

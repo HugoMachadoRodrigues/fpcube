@@ -128,13 +128,34 @@ def load_optical(lo=None, hi=None, start=None, end=None):
 
 
 GEOMETRY_STATES = ("pass", "fail", "not_assessed")
+MIN_SCENE_PEAK = 0.1      # scene-level estimates with a weaker phase-correlation peak are noise (72 of 74 'fails')
 
 
-def screen_optical(d):
-    """Quality flags of each field x acquisition record. The geometric shift is estimated only when the window of
-    clear field pixels is at least 64 x 64 pixels with enough overlap with the tile reference; otherwise it is not
-    assessed. Such records are kept (qa_geometry True, as in v1.0) but 'qa_geometry_status' says 'not_assessed' and
-    'shift_px' is missing, so users can exclude them."""
+def load_scene_shifts():
+    """Scene-level shift estimates (fpcube.sources.scene_shift) for granules whose field window was too small."""
+    parts = [pd.read_parquet(p) for p in (config.INTERIM / "optical" / "scene_shift").glob("T*.parquet")]
+    if not parts:
+        return None
+    s = pd.concat(parts, ignore_index=True).drop_duplicates("item")
+    s = s[s.shift_peak >= MIN_SCENE_PEAK]                   # weaker peaks: the granule stays not assessed
+    return s[["item", "shift_row", "shift_col", "shift_peak"]].dropna(subset=["shift_row"])
+
+
+def screen_optical(d, scene=None):
+    """Quality flags of each field x acquisition record. The geometric shift is estimated during extraction over the
+    window of clear field pixels when it is at least 64 x 64 pixels ('fields' scope); for the other granules it is
+    taken from a scene-level estimate over a 512 x 512 clear block of the tile ('scene' scope) when one exists with a
+    phase-correlation peak of at least MIN_SCENE_PEAK.
+    Records with neither stay 'not_assessed': kept (qa_geometry True) but with 'shift_px' missing, so users can
+    exclude them."""
+    d = d.drop(columns=[c for c in ("qa_geometry_status", "shift_scope", "shift_px") if c in d])
+    scope = np.where(d.shift_row.notna(), "fields", "none").astype(object)
+    if scene is not None and len(scene):
+        m = d[["item"]].merge(scene, on="item", how="left")
+        fill = d.shift_row.isna().to_numpy() & m.shift_row.notna().to_numpy()
+        for c in ("shift_row", "shift_col", "shift_peak"):
+            d[c] = np.where(fill, m[c].to_numpy(), d[c].to_numpy())
+        scope[fill] = "scene"
     ok_clear = (d.n_clear_px >= np.maximum(3, 0.3 * d.n_field_px))
     sh = np.hypot(d.shift_row, d.shift_col)                     # NaN when the shift was not estimated
     assessed = sh.notna()
@@ -145,24 +166,62 @@ def screen_optical(d):
     ok_haze = d.blue <= MAX_BLUE
     d = d.assign(qa_clear=ok_clear, qa_geometry=ok_geo,
                  qa_geometry_status=pd.Categorical(status, categories=GEOMETRY_STATES),
+                 shift_scope=pd.Categorical(scope, categories=("fields", "scene", "none")),
                  qa_range=ok_range, qa_haze=ok_haze, qa_use=ok_clear & ok_geo & ok_range & ok_haze, shift_px=sh)
     return d
 
 
-def rescreen_release(version="v1.0"):
-    """Re-apply screen_optical to the release's optical tables (adds qa_geometry_status; the other flags and
-    therefore the cube are unchanged)."""
+def apply_scene_shift(version="v1.0"):
+    """Bring the scene-level shifts into a built release: re-screen the optical tables, then recompute the optical
+    composites of the fields whose usable records changed (newly failed granules) and write them into cube.zarr and
+    fields.parquet in place. Returns a summary."""
+    import zarr
     rel = config.RELEASE / version
+    scene = load_scene_shifts()
+    changed, stats = set(), {}
     for p in sorted((rel / "optical_observations").glob("*.parquet")):
-        d = pd.read_parquet(p)
-        before = d.qa_use.to_numpy().copy()
-        d = screen_optical(d.drop(columns=[c for c in ("qa_geometry_status",) if c in d]))
-        if not np.array_equal(before, d.qa_use.to_numpy()):
-            raise SystemExit(f"{p.name}: qa_use changed, the cube would need a rebuild")
+        d0 = pd.read_parquet(p)
+        if "shift_scope" in d0:                                  # undo an earlier fill so this is repeatable
+            back = d0.shift_scope == "scene"
+            d0.loc[back, ["shift_row", "shift_col", "shift_peak"]] = np.nan
+        d = screen_optical(d0, scene)
+        diff = d0.qa_use.to_numpy() != d.qa_use.to_numpy()
+        changed |= set(d.fid[diff].tolist())
+        stats[p.stem] = {"records": int(len(d)), "scene_assessed": int((d.shift_scope == "scene").sum()),
+                         "still_not_assessed": int((d.qa_geometry_status == "not_assessed").sum()),
+                         "newly_failed": int(diff.sum())}
         tmp = p.with_suffix(".tmp")
         d.to_parquet(tmp, index=False)
         tmp.replace(p)
-        print(p.name, d.qa_geometry_status.value_counts(normalize=True).round(4).to_dict(), flush=True)
+        print(p.stem, stats[p.stem], flush=True)
+    if changed:
+        fields = pd.read_parquet(rel / "fields.parquet")
+        fids_all = fields.fid.to_numpy()
+        fids = np.array(sorted(changed))
+        times = calendar()
+        obs = pd.concat([pd.read_parquet(p, filters=[("fid", "in", fids.tolist())])
+                         for p in sorted((rel / "optical_observations").glob("*.parquet"))], ignore_index=True)
+        a, n, f_ = optical_composites(obs, fids, times)
+        idx = np.searchsorted(fids_all, fids)
+        z = zarr.open(str(rel / "cube.zarr"), mode="r+")
+        for v in OPT_VARS:
+            z[v].set_orthogonal_selection((idx, slice(None)), a[v])
+        z["n_optical_obs"].set_orthogonal_selection((idx, slice(None)), n)
+        z["gap_filled"].set_orthogonal_selection((idx, slice(None)), f_)
+        nobs_all = z["n_optical_obs"][:]
+        nrad_all = z["n_radar_obs"][:]
+        fields["n_optical_periods"] = (nobs_all > 0).sum(1).astype(np.int16)
+        fields["flag_no_optical"] = fields.n_optical_periods == 0
+        fields["flag_no_observations"] = fields.flag_no_optical & ((nrad_all > 0).sum(1) == 0)
+        g = __import__("geopandas").read_parquet(rel / "fields.parquet")
+        for c in ("n_optical_periods", "flag_no_optical", "flag_no_observations"):
+            g[c] = fields[c].to_numpy()
+        tmp = rel / "fields.tmp.parquet"
+        g.to_parquet(tmp)
+        tmp.replace(rel / "fields.parquet")
+    stats["fields_recomposited"] = len(changed)
+    (rel / "scene_shift_applied.json").write_text(__import__("json").dumps(stats, indent=1))
+    return stats
 
 
 def merge_tiles(d):
@@ -301,6 +360,7 @@ def build(version="v1.0"):
     fields = static_table().sort_values("fid").reset_index(drop=True)
     fids = fields.fid.to_numpy()
     times = calendar()
+    scene = load_scene_shifts()
 
     # composites field chunk by field chunk, so the observation tables never sit in memory whole
     opt = {v: np.full((len(fids), len(times)), np.nan, np.float32) for v in OPT_VARS}
@@ -313,7 +373,7 @@ def build(version="v1.0"):
         lo, hi = int(fids[sl][0]), int(fids[sl][-1]) + 1
         o = load_optical(lo, hi)
         if len(o):
-            a, n, f_ = optical_composites(screen_optical(o), fids[sl], times)
+            a, n, f_ = optical_composites(screen_optical(o, scene), fids[sl], times)
             for v in OPT_VARS:
                 opt[v][sl] = a[v]
             nobs[sl], filled[sl] = n, f_
@@ -366,7 +426,7 @@ def build(version="v1.0"):
             if not len(d):
                 continue
             if kind == "optical":
-                d = screen_optical(d)                     # keeps 'item', the HLS granule id
+                d = screen_optical(d, scene)              # keeps 'item', the HLS granule id
             d.to_parquet(rel / sub / f"{y}.parquet", index=False)
     (rel / "labels").mkdir()
     for p in (config.RAW / "labels").glob("*.parquet"):
@@ -376,7 +436,7 @@ def build(version="v1.0"):
 
 if __name__ == "__main__":
     import sys
-    if sys.argv[1:2] == ["--rescreen"]:
-        rescreen_release(*sys.argv[2:3])
+    if sys.argv[1:2] == ["--apply-scene-shift"]:
+        print(apply_scene_shift(*sys.argv[2:3]))
     else:
         print(build())
