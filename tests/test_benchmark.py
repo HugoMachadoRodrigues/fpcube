@@ -60,21 +60,45 @@ def test_task1_splits_and_features():
     assert np.nanmean(np.abs(clim - y)) < 0.2
 
 
-def test_task3_and_mil():
-    ds, f = synthetic()
-    times = pd.DatetimeIndex(ds.time.values)
+def weekly_usdm(f, start="2018-01-02", n=120, seed=0):
+    """Weekly maps (Tuesdays) with a class that drifts up and down, for every county of the synthetic fields."""
+    rng = np.random.default_rng(seed)
     rows = []
     for c in f.county_fips.unique():
-        for d in times[10::40]:
-            rows.append({"county_fips": c, "valid_start": d, "D0": 60.0, "D1": 0.0, "D2": 0.0, "D3": 0.0, "D4": 0.0})
-    u = T.task3_samples(pd.DataFrame(rows), f, ds)
-    assert (u.y == 1).all()
+        cls = np.clip(np.cumsum(rng.choice([-1, 0, 0, 0, 1], n)), 0, 3)
+        for d, k in zip(pd.date_range(start, periods=n, freq="7D"), cls):
+            rows.append({"county_fips": c, "valid_start": d, "D0": 60.0 * (k >= 1), "D1": 60.0 * (k >= 2),
+                         "D2": 60.0 * (k >= 3), "D3": 0.0, "D4": 0.0})
+    return pd.DataFrame(rows)
+
+
+def test_task3_change_target_and_mil():
+    ds, f = synthetic()
+    usdm = weekly_usdm(f)
+    u = T.task3_samples(usdm, f, ds, horizon=4)
+    assert len(u) > 0 and set(u.direction) <= {0, 1, 2}
+    # the target is the class 4 weeks later; momentum is the change over the previous 4 weeks
+    full = usdm.assign(y=T.drought_classes(usdm)).set_index(["county_fips", "valid_start"]).y
+    for r in u.sample(20, random_state=0).itertuples():
+        fut = full[(r.county_fips, r.valid_start + pd.Timedelta(days=28))]
+        past = full[(r.county_fips, r.valid_start - pd.Timedelta(days=28))]
+        assert r.direction == np.sign(fut - r.y) + 1 and r.momentum == r.y - past
+    # no target crosses a split boundary
+    assert (T.year_split(u.target_date.dt.year.to_numpy())[u.split.isin(["train", "val", "test"])]
+            == u.split[u.split.isin(["train", "val", "test"])]).all()
     bags = T.task3_bags(u, f, ds)
     assert all(b.shape[1] == 4 for b in bags)   # NDVI anomaly, NDMI, VV, 30-day rain
-    y = np.random.default_rng(0).integers(0, 4, len(bags))
-    mil = M.train_mil(bags[:30], y[:30], bags[30:40], y[30:40], epochs=2)
-    p = M.predict_mil(mil, bags[40:])
-    assert ((p >= 0) & (p <= 3)).all()
+    cov = T.county_covariates(u)
+    assert cov.shape == (len(u), 7)
+    prob = T.transition_climatology(u)(u)
+    assert np.allclose(prob.sum(1), 1)
+    mb = [np.c_[b, np.repeat(c[None], len(b), 0)] for b, c in zip(bags, cov)]
+    y = u.direction.to_numpy()
+    mil = M.train_mil(mb[:30], y[:30], mb[30:40], y[30:40], n_class=3, epochs=2)
+    pr = M.predict_mil_proba(mil, mb[40:60])
+    assert pr.shape == (len(mb[40:60]), 3) and np.allclose(pr.sum(1), 1, atol=1e-5)
+    r = M.direction_metrics(y[40:60], pr.argmax(1), pr)
+    assert 0 <= r["macro_f1"] <= 1 and "auroc_worse" in r
 
 
 def test_seq_model_runs():
@@ -143,25 +167,21 @@ def test_observed_only_removes_filled_values():
     assert np.isnan(T.observed_only(ds.copy(deep=True)).ndvi.values[:, 5]).all()
 
 
-def test_anomaly_cut_rule_gives_lowest_to_driest():
-    y = np.r_[np.zeros(70, int), np.ones(10, int), np.full(10, 2), np.full(10, 3)]
+def test_anomaly_cut_rule_gives_lowest_to_worse():
+    y = np.r_[np.zeros(20, int), np.ones(60, int), np.full(20, 2)]       # better, same, worse
     rule = T.anomaly_cut_rule(np.arange(100.0), y)
     p = rule(np.arange(100.0))
-    assert np.bincount(p, minlength=4).tolist() == [70, 10, 10, 10]
-    assert (p[:10] == 3).all() and (p[-70:] == 0).all()
+    assert np.bincount(p, minlength=3).tolist() == [20, 60, 20]
+    assert (p[:20] == 2).all() and (p[-20:] == 0).all()
 
 
 def test_task3_window_ends_before_map():
     ds, f = synthetic()
     times = pd.DatetimeIndex(ds.time.values)
-    maps = pd.date_range("2018-01-02", periods=60, freq="7D")            # Tuesdays, mid-period on most weeks
-    u = pd.DataFrame([{"county_fips": c, "valid_start": d, "D0": 0.0, "D1": 0.0, "D2": 0.0, "D3": 0.0, "D4": 0.0}
-                      for c in f.county_fips.unique() for d in maps])
-    u = T.task3_samples(u, f, ds)
+    u = T.task3_samples(weekly_usdm(f, n=60), f, ds)
     last_end = T.period_ends(times)[u.t - 1]
     assert (last_end <= u.valid_start).all()
     assert (T.period_ends(times)[np.minimum(u.t, len(times) - 1)] > u.valid_start).all()   # the latest such window
-    assert u.y_prev.notna().sum() > 0
 
 
 def test_cluster_bootstrap_interval():

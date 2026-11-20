@@ -201,21 +201,24 @@ def fig5(rel):
         axs[2].set_ylabel("AUROC per event (bar: median)")
         axs[2].legend(fontsize=6.0, ncol=2, loc="lower left")
         axs[2].set_title("c  Task 2")
-    p3 = b / "task3_confusion_attention_mil.csv"
-    if p3.exists():
-        cm = pd.read_csv(p3, index_col=0).to_numpy()
-        cmn = cm / cm.sum(1, keepdims=True)
-        axs[3].imshow(cmn, cmap=SEQ, vmin=0, vmax=1)
-        for i in range(4):
-            for j in range(4):
-                axs[3].text(j, i, f"{cm[i, j]}", ha="center", va="center", fontsize=7,
-                            color="white" if cmn[i, j] > 0.5 else INK)
-        cls = ["None", "D0", "D1", "D2+"]
-        axs[3].set_xticks(range(4), cls)
-        axs[3].set_yticks(range(4), [f"{c} ({100 * cmn[i, i]:.0f} %)" for i, c in enumerate(cls)])
-        axs[3].grid(False)
-        axs[3].set_xlabel("Predicted"); axs[3].set_ylabel("USDM class (recall)")
-        axs[3].set_title("d  Task 3, attention MIL (temporal test)")
+    p3 = b / "task3_results.csv"
+    if p3.exists() and "auroc_worse" in pd.read_csv(p3, nrows=1):
+        r3 = pd.read_csv(p3)
+        r3 = r3[r3.split == "test"].set_index("model")
+        models = [("transition_climatology", "Transition climatology"), ("lightgbm_usdm_only", "LightGBM, USDM only"),
+                  ("lightgbm_with_fields", "LightGBM, with fields"), ("attention_mil", "Attention MIL")]
+        for k, (m, l_) in enumerate(models):
+            for j, dirn in enumerate(("worse", "better")):
+                v, lo, hi = r3.loc[m, [f"auroc_{dirn}", f"auroc_{dirn}_lo", f"auroc_{dirn}_hi"]]
+                axs[3].errorbar(j + (k - 1.5) * 0.17, v, yerr=[[v - lo], [hi - v]], marker="o", ms=4, color=C[k],
+                                capsize=1.5, lw=1.2, label=l_ if j == 0 else None)
+        axs[3].set_xticks([0, 1], ["Worse in 4 weeks", "Better in 4 weeks"])
+        axs[3].set_xlim(-0.6, 1.6)
+        axs[3].set_ylim(0.3, 0.92)
+        axs[3].axhline(0.5, color=MUTED, lw=0.8, ls="--")
+        axs[3].set_ylabel("AUROC (95 % interval)")
+        axs[3].legend(fontsize=6.0, loc="lower center")
+        axs[3].set_title("d  Task 3, drought class change (temporal test)")
     fig.tight_layout()
     save(fig, "fig5_benchmark")
 

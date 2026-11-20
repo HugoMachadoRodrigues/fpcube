@@ -156,56 +156,73 @@ def task2(cube, fields):
     return pd.DataFrame(rows), ev_table
 
 
-def task3(cube, fields):
+def task3(cube, fields, horizon=4):
+    """Drought class change: from the USDM map at t0, the county's class and its recent change, and the field
+    evidence of the 30 days before t0, predict whether the class is better, the same or worse `horizon` weeks later.
+    LightGBM is fitted with and without the field evidence, which isolates what the cube adds to the USDM history."""
+    from sklearn.metrics import roc_auc_score
     usdm = pd.read_parquet(config.RAW / "labels" / "usdm_county_weekly.parquet")
-    u = T.task3_samples(usdm, fields, cube)
+    u = T.task3_samples(usdm, fields, cube, horizon=horizon)
     bags = T.task3_bags(u, fields, cube)
     log("task3", f"{len(u):,} county-weeks, {sum(len(b) for b in bags):,} field instances")
     import warnings
     with warnings.catch_warnings():
         warnings.simplefilter("ignore", RuntimeWarning)
         agg = np.stack([np.r_[np.nanmean(b, 0), np.nanpercentile(b, [10, 50, 90], 0).ravel()] for b in bags])
-    rows, cms, pred_rows = [], {}, []
+    cov = T.county_covariates(u)
     sp = u.split.to_numpy()
     tr, va = sp == "train", sp == "val"
-    ytr = u.y[tr].to_numpy()
-    m = agg[:, 0]
-    rule = T.anomaly_cut_rule(m[tr], ytr)
-    majority = int(np.bincount(ytr, minlength=4).argmax())
-    gbm = M.lgbm_fit(agg[tr], ytr, agg[va], u.y[va], objective="multiclass", num_class=4,
-                     num_threads=THREADS["task3"])
+    d = u.direction.to_numpy()
+    rule = T.anomaly_cut_rule(agg[tr, 0], d[tr])
+    clim = T.transition_climatology(u[tr])
+    fit = lambda X: M.lgbm_fit(X[tr], d[tr], X[va], d[va], objective="multiclass", num_class=3,
+                               num_threads=THREADS["task3"])
+    gbm_c = fit(cov)
+    gbm_f = fit(np.c_[cov, agg])
     log("task3", "LightGBM done")
-    mil = M.train_mil([bags[i] for i in np.nonzero(tr)[0]], ytr,
-                      [bags[i] for i in np.nonzero(va)[0]], u.y[va].to_numpy())
+    mbags = [np.c_[b, np.repeat(c[None], len(b), 0)] for b, c in zip(bags, cov)]   # county inputs on every field
+    mil = M.train_mil([mbags[i] for i in np.nonzero(tr)[0]], d[tr], [mbags[i] for i in np.nonzero(va)[0]], d[va],
+                      n_class=3)
     log("task3", "attention MIL done")
     month = u.valid_start.dt.to_period("M").astype(str).to_numpy()
+    rows, cms, pred_rows, gain = [], {}, [], []
     for name in ("test", "test_spatial"):
-        te = (sp == name) & u.y_prev.notna().to_numpy()          # same county-weeks for every model
-        y = u.y[te].to_numpy()
-        preds = {"majority_class": np.full(te.sum(), majority), "usdm_last_week": u.y_prev[te].to_numpy().astype(int),
-                 "rule_anomaly_cuts": rule(m[te]), "lightgbm_bag_stats": gbm.predict(agg[te]).argmax(1),
-                 "attention_mil": M.predict_mil(mil, [bags[i] for i in np.nonzero(te)[0]]).astype(int)}
-        cl1, cl2 = u.county_fips.to_numpy()[te], month[te]
-        change = y != u.y_prev[te].to_numpy().astype(int)     # county-weeks whose USDM class differs from last week
-        for k, p in preds.items():
-            p = np.clip(p, 0, 3)
-            preds[k] = p
-            for sub, keep in ((name, slice(None)), (f"{name}_change", change)):
-                ys, ps, c1, c2 = y[keep], p[keep], cl1[keep], cl2[keep]
-                r = M.ordinal_metrics(ys, ps)
-                for stat in ("qwk", "macro_f1"):
-                    lo, hi = M.pigeonhole_bootstrap(lambda w: M.ordinal_metrics(ys, ps, w)[stat], c1, c2, B=300)
-                    r[f"{stat}_lo"], r[f"{stat}_hi"] = lo, hi
-                prev = u.y_prev[te].to_numpy().astype(int)[keep]   # share with the right direction of change
-                r["direction_acc"] = float(np.mean(np.sign(ps - prev) == np.sign(ys - prev)))
-                rows.append({"task": 3, "split": sub, "model": k, **r})
+        te = sp == name
+        y = d[te]
+        sub = u[te]
+        probs = {"transition_climatology": clim(sub), "lightgbm_usdm_only": gbm_c.predict(cov[te]),
+                 "lightgbm_with_fields": gbm_f.predict(np.c_[cov, agg][te]),
+                 "attention_mil": M.predict_mil_proba(mil, [mbags[i] for i in np.nonzero(te)[0]])}
+        preds = {"no_change": np.ones(te.sum(), int),
+                 "momentum": (np.sign(sub.momentum.to_numpy()) + 1).astype(int),
+                 "ndvi_anomaly_rule": rule(agg[te, 0]).astype(int),
+                 **{k: v.argmax(1) for k, v in probs.items()}}
+        cl1, cl2 = sub.county_fips.to_numpy(), month[te]
+        for k, pk in preds.items():
+            pr = probs.get(k)
+            r = M.direction_metrics(y, pk, pr)
+            stats = {"macro_f1": lambda w: M.direction_metrics(y, pk, w=w)["macro_f1"]}
+            if pr is not None:
+                stats["auroc_worse"] = lambda w: roc_auc_score(y == 2, pr[:, 2], sample_weight=w)
+                stats["auroc_better"] = lambda w: roc_auc_score(y == 0, pr[:, 0], sample_weight=w)
+            for st, f in stats.items():
+                r[f"{st}_lo"], r[f"{st}_hi"] = M.pigeonhole_bootstrap(f, cl1, cl2, B=300)
+            rows.append({"task": 3, "split": name, "horizon_weeks": horizon, "model": k, **r})
             if name == "test":
                 from sklearn.metrics import confusion_matrix
-                cms[k] = pd.DataFrame(confusion_matrix(y, p, labels=[0, 1, 2, 3]),
-                                      index=["none", "D0", "D1", "D2+"], columns=["none", "D0", "D1", "D2+"])
-        pred_rows.append(pd.DataFrame({"county_fips": u.county_fips.to_numpy()[te], "valid_start": u.valid_start.to_numpy()[te],
-                                       "split": name, "y": y, **{f"pred_{k}": v for k, v in preds.items()}}))
+                cms[k] = pd.DataFrame(confusion_matrix(y, pk, labels=[0, 1, 2]), index=M.DIRECTIONS,
+                                      columns=M.DIRECTIONS)
+        for k, nm in ((2, "worse"), (0, "better")):          # what the field evidence adds, paired by sample
+            f_, c_ = probs["lightgbm_with_fields"][:, k], probs["lightgbm_usdm_only"][:, k]
+            dlt = lambda w: roc_auc_score(y == k, f_, sample_weight=w) - roc_auc_score(y == k, c_, sample_weight=w)
+            lo, hi = M.pigeonhole_bootstrap(dlt, cl1, cl2, B=300)
+            gain.append({"split": name, "direction": nm, "auroc_with_fields_minus_usdm_only": float(dlt(None)),
+                         "lo": lo, "hi": hi})
+        pred_rows.append(pd.DataFrame({"county_fips": cl1, "valid_start": sub.valid_start.to_numpy(), "split": name,
+                                       "direction": y, **{f"pred_{k}": v for k, v in preds.items()},
+                                       **{f"p_worse_{k}": v[:, 2] for k, v in probs.items()}}))
     u.attrs["predictions"] = pd.concat(pred_rows, ignore_index=True)
+    u.attrs["gain"] = pd.DataFrame(gain)
     return pd.DataFrame(rows), u, cms
 
 
@@ -231,12 +248,15 @@ def run_task(name, release, max_train):
     else:
         r, u, cms = task3(cube, fields)
         r.to_csv(out / "task3_results.csv", index=False)
+        for f_ in out.glob("task3_confusion*.csv"):
+            f_.unlink()
         for k, cm in cms.items():
             cm.to_csv(out / f"task3_confusion_{k}.csv")
-        (out / "task3_confusion.csv").unlink(missing_ok=True)
         u.attrs.pop("predictions").to_parquet(out / "task3_predictions.parquet", index=False)
-        u[["county_fips", "valid_start", "y", "y_prev", "split"]].to_parquet(out / "task3_samples.parquet",
-                                                                            index=False)
+        u.attrs.pop("gain").to_csv(out / "task3_field_evidence_gain.csv", index=False)
+        info["n_dropped_crossing_split"] = u.attrs.get("n_dropped_crossing_split")
+        u[["county_fips", "valid_start", "target_date", "y", "momentum", "direction", "split"]].to_parquet(
+            out / "task3_samples.parquet", index=False)
     info["finished"] = time.strftime("%Y-%m-%d %H:%M:%S")
     (out / f"{name}_run_info.json").write_text(json.dumps(info, indent=2))
     log(name, "finished")
@@ -297,36 +317,30 @@ def paper_text(out):
         g = ev[(ev.experiment == "leave_one_event_out") & (ev.model == "lightgbm")].groupby("kind").auroc.median()
         t["TaskTwoSummary"] = ("the median AUROC per event of LightGBM with one event left out is " +
                                "; ".join(f"{k.replace('_', ' ')} {v:.2f}" for k, v in g.items()))
-    if (out / "task3_results.csv").exists():
+    if (out / "task3_results.csv").exists() and "direction_acc" not in pd.read_csv(out / "task3_results.csv", nrows=1):
         r = pd.read_csv(out / "task3_results.csv").set_index(["split", "model"])
+        g = pd.read_csv(out / "task3_field_evidence_gain.csv").set_index(["split", "direction"])
         x = lambda m, c: r.loc[("test", m), c]
         ci = lambda m, c: "{:.2f} [{:.2f}, {:.2f}]".format(x(m, c), x(m, c + "_lo"), x(m, c + "_hi"))
+        n = lambda k: f"{int(x('no_change', 'n_' + k)):,}".replace(",", "\\,")
+        gg = lambda k: "{:+.2f} [{:+.2f}, {:+.2f}]".format(*g.loc[("test", k)].to_numpy())
         parts.append(
-            "In Task~3 ({n} county-weeks in the temporal test set) the quadratic weighted kappa [95\\,\\% interval] "
-            "is {mil} for attention MIL, {gbm} for LightGBM on bag statistics, {rule} for the NDVI-anomaly cut points, "
-            "{last} for last week's USDM class and {maj} for the majority class; macro F1 is {milf}, {gbmf}, {rulef}, "
-            "{lastf} and {majf}. Attention MIL recovers {r3:.0f}\\,\\% of the D2+ county-weeks ({n3} cases) and "
-            "{r0:.0f}\\,\\% of those without drought.".format(
-                n=f"{int(x('attention_mil', 'n')):,}".replace(",", "\\,"),
-                mil=ci("attention_mil", "qwk"), gbm=ci("lightgbm_bag_stats", "qwk"), rule=ci("rule_anomaly_cuts", "qwk"),
-                last=ci("usdm_last_week", "qwk"), maj=f"{x('majority_class', 'qwk'):.2f}",
-                milf=f"{x('attention_mil', 'macro_f1'):.2f}", gbmf=f"{x('lightgbm_bag_stats', 'macro_f1'):.2f}",
-                rulef=f"{x('rule_anomaly_cuts', 'macro_f1'):.2f}", lastf=f"{x('usdm_last_week', 'macro_f1'):.2f}",
-                majf=f"{x('majority_class', 'macro_f1'):.2f}", r3=100 * x("attention_mil", "recall_d2plus"),
-                n3=int(x("attention_mil", "n_d2plus")), r0=100 * x("attention_mil", "recall_none")))
-        if ("test_change", "attention_mil") in r.index:
-            xc = lambda m, c: r.loc[("test_change", m), c]
-            cc = lambda m: "{:.2f} [{:.2f}, {:.2f}]".format(xc(m, "qwk"), xc(m, "qwk_lo"), xc(m, "qwk_hi"))
-            t["TaskThreeChange"] = (
-                "In the {n} test county-weeks whose USDM class differs from the previous week, the quadratic weighted "
-                "kappa is {last} for last week's class, {rule} for the NDVI-anomaly cut points, {gbm} for LightGBM and "
-                "{mil} for attention MIL, and the direction of the change (worse or better than last week) is right in "
-                "{dr:.0f}\\,\\%, {dg:.0f}\\,\\% and {dm:.0f}\\,\\% of these weeks for the last three, against "
-                "{dj:.0f}\\,\\% for the majority class.").format(dj=100 * xc("majority_class", "direction_acc"),
-                n=f"{int(xc('attention_mil', 'n')):,}".replace(",", "\\,"), last=cc("usdm_last_week"),
-                rule=cc("rule_anomaly_cuts"), gbm=cc("lightgbm_bag_stats"), mil=cc("attention_mil"),
-                dr=100 * xc("rule_anomaly_cuts", "direction_acc"), dg=100 * xc("lightgbm_bag_stats", "direction_acc"),
-                dm=100 * xc("attention_mil", "direction_acc"))
+            "In Task~3 ({nt} county-weeks in the temporal test set: {nb} better, {ns} the same and {nw} worse four "
+            "weeks later), the AUROC of a worsening [95\\,\\% interval] is {cw} for the transition climatology, {gw} for "
+            "LightGBM on the USDM history alone, {fw} for LightGBM with the field evidence and {mw} for attention MIL; "
+            "the AUROC of an improvement is {cb}, {gb}, {fb} and {mb}. Adding the field evidence changes the AUROC of "
+            "LightGBM by {dw} for worsening and {db} for improvement. Macro F1 is {nc} for no change, {mo} for the "
+            "momentum rule, {ru} for the NDVI-anomaly rule, {f_cl}, {f_gc}, {f_gf} and {f_mil} for the four models "
+            "above.".format(
+                nt=f"{int(x('no_change', 'n')):,}".replace(",", "\\,"), nb=n("better"), ns=n("same"), nw=n("worse"),
+                cw=ci("transition_climatology", "auroc_worse"), gw=ci("lightgbm_usdm_only", "auroc_worse"),
+                fw=ci("lightgbm_with_fields", "auroc_worse"), mw=ci("attention_mil", "auroc_worse"),
+                cb=ci("transition_climatology", "auroc_better"), gb=ci("lightgbm_usdm_only", "auroc_better"),
+                fb=ci("lightgbm_with_fields", "auroc_better"), mb=ci("attention_mil", "auroc_better"),
+                dw=gg("worse"), db=gg("better"), nc=f"{x('no_change', 'macro_f1'):.2f}",
+                mo=f"{x('momentum', 'macro_f1'):.2f}", ru=f"{x('ndvi_anomaly_rule', 'macro_f1'):.2f}",
+                f_cl=f"{x('transition_climatology', 'macro_f1'):.2f}", f_gc=f"{x('lightgbm_usdm_only', 'macro_f1'):.2f}",
+                f_gf=f"{x('lightgbm_with_fields', 'macro_f1'):.2f}", f_mil=f"{x('attention_mil', 'macro_f1'):.2f}"))
     t["BenchmarkResults"] = " ".join(parts) + " Figure~\\ref{fig:benchmark} summarises the results."
     (out / "benchmark_text.json").write_text(json.dumps(t, indent=2))
     return t

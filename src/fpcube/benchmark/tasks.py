@@ -323,27 +323,70 @@ def drought_classes(u):
     return np.select([u.D2 >= 50, u.D1 >= 50, u.D0 >= 50], [3, 2, 1], 0)
 
 
-def task3_samples(usdm, fields, cube, window=6):
-    """County-weeks with the index t of the first period after the input window: the window is the `window`
-    periods [t - window, t) whose ends are all on or before the map date (USDM valid_start, the Tuesday the map
-    describes). 'y_prev' is the county's class on the previous weekly map (a baseline that is known at that date)."""
+def task3_samples(usdm, fields, cube, window=6, horizon=4):
+    """Task 3, drought class change: county-weeks issued at a USDM map date t0 (valid_start). Known at issue: the
+    county class y0, its change over the previous `horizon` weeks ('momentum', y0 minus the class `horizon` weeks
+    earlier) and the field evidence of the `window` periods [t - window, t) whose ends are all on or before t0.
+    Target: the direction of the class change from t0 to the map `horizon` weeks later, 0 = better (lower class),
+    1 = same, 2 = worse. Both maps around t0 must be exactly 7*horizon days away. The year split applies to the
+    issue and the target date; county-weeks whose target falls in a later split are dropped (n in attrs)."""
     times = pd.DatetimeIndex(cube.time.values)
     u = usdm.sort_values(["county_fips", "valid_start"]).copy()
     u["y"] = drought_classes(u)
-    prev = u.groupby("county_fips").y.shift(1)
-    gap = u.groupby("county_fips").valid_start.diff().dt.days
-    u["y_prev"] = prev.where(gap == 7)
+    g = u.groupby("county_fips")
+    days = 7 * horizon
+    fut, past = g.y.shift(-horizon), g.y.shift(horizon)
+    fut_ok = (g.valid_start.shift(-horizon) - u.valid_start).dt.days == days
+    past_ok = (u.valid_start - g.valid_start.shift(horizon)).dt.days == days
+    u = u[fut_ok & past_ok].copy()
+    u["y_future"] = fut[u.index].astype(int)
+    u["momentum"] = (u.y - past[u.index]).astype(int)
+    u["direction"] = np.sign(u.y_future - u.y).astype(int) + 1
+    u["target_date"] = u.valid_start + pd.Timedelta(days=days)
     u["t"] = np.searchsorted(period_ends(times), u.valid_start, side="right")
     u = u[(u.t >= window) & (u.t <= len(times))]
     have = set(fields.county_fips) if "county_fips" in fields else set()
     u = u[u.county_fips.isin(have)]
-    u["split"] = year_split(u.valid_start.dt.year.to_numpy())
+    s_issue = year_split(u.valid_start.dt.year.to_numpy())
+    s_target = year_split(u.target_date.dt.year.to_numpy())
+    crossing = s_issue != s_target
+    u["split"] = s_issue
+    u = u[~crossing].copy()
     grp = county_groups(fields)
     name_of = fields.drop_duplicates("county_fips").set_index("county_fips").county
     u["county_group"] = u.county_fips.map(name_of).map(grp)
     u.loc[u.county_group == 0, "split"] = u.loc[u.county_group == 0, "split"].map(
         {"train": "drop", "val": "drop", "test": "test_spatial"})
-    return u[u.split != "drop"].reset_index(drop=True)
+    u = u[u.split != "drop"].reset_index(drop=True)
+    u.attrs["n_dropped_crossing_split"] = int(crossing.sum())
+    return u
+
+
+def county_covariates(u):
+    """County-level inputs known at issue: current class (one-hot), momentum, season (sin and cos of day of year)."""
+    doy = u.valid_start.dt.day_of_year.to_numpy()
+    return np.c_[np.eye(4)[u.y.to_numpy()], u.momentum.to_numpy(), np.sin(2 * np.pi * doy / 365.25),
+                 np.cos(2 * np.pi * doy / 365.25)].astype(np.float32)
+
+
+def transition_climatology(u_train, n_class=3):
+    """Probability of each change direction given the current class and calendar month, from the training years
+    (falls back to the current class alone, then to all training samples)."""
+    key = lambda d: d.y.astype(str).to_numpy() + "_" + d.valid_start.dt.month.astype(str).to_numpy()
+    dirs = u_train.direction.to_numpy()
+    tab = pd.crosstab(key(u_train), dirs).reindex(columns=range(n_class), fill_value=0)
+    by_y = pd.crosstab(u_train.y.to_numpy(), dirs).reindex(columns=range(n_class), fill_value=0)
+    allp = np.bincount(dirs, minlength=n_class) / len(u_train)
+
+    def prob(d):
+        out = np.tile(allp, (len(d), 1))
+        for i, (k, y) in enumerate(zip(key(d), d.y.to_numpy())):
+            row = tab.loc[k] if k in tab.index else (by_y.loc[y] if y in by_y.index else None)
+            if row is not None:
+                v = row.to_numpy().astype(float) + 0.5
+                out[i] = v / v.sum()
+        return out
+    return prob
 
 
 def ndvi_anomaly(cube):
@@ -388,9 +431,9 @@ def task3_bags(u, fields, cube, window=6):
     return bags
 
 
-def anomaly_cut_rule(m_train, y_train, n_class=4):
-    """Ordinal cut points on the county mean NDVI anomaly: the lowest anomalies go to the driest class, each class
-    receiving its training frequency (D2+ gets the lowest p(D2+) share, then D1, D0, none)."""
+def anomaly_cut_rule(m_train, y_train, n_class=3):
+    """Ordinal cut points on the county mean NDVI anomaly: the lowest anomalies go to the highest class (for Task 3,
+    'worse'), each class receiving its training frequency."""
     freq = np.bincount(y_train, minlength=n_class) / len(y_train)
     q = np.cumsum(freq[::-1])[:-1]                    # p(D2+), p(D2+)+p(D1), p(D2+)+p(D1)+p(D0)
     cuts = np.nanquantile(m_train, q)

@@ -47,6 +47,30 @@ def binary_metrics(y, s):
             "f1_at_prevalence": float(f1_score(y, s >= thr)), "prevalence": float(y.mean())}
 
 
+DIRECTIONS = ("better", "same", "worse")
+
+
+def direction_metrics(y, p, prob=None, w=None):
+    """Task 3: macro F1, balanced accuracy and accuracy of the change direction (0 better, 1 same, 2 worse); without
+    weights also recall and count per direction, and with class probabilities the AUROC of 'worse' and of
+    'better' against the rest."""
+    from sklearn.metrics import balanced_accuracy_score, f1_score, recall_score, roc_auc_score
+    out = {"n": int(len(y)),
+           "macro_f1": float(f1_score(y, p, average="macro", labels=[0, 1, 2], sample_weight=w, zero_division=0)),
+           "balanced_accuracy": float(balanced_accuracy_score(y, p, sample_weight=w)),
+           "accuracy": float(np.average(y == p, weights=w))}
+    if w is None:
+        rec = recall_score(y, p, labels=[0, 1, 2], average=None, zero_division=0)
+        for k, nm in enumerate(DIRECTIONS):
+            out[f"recall_{nm}"] = float(rec[k])
+            out[f"n_{nm}"] = int((y == k).sum())
+        if prob is not None:
+            for k, nm in ((2, "worse"), (0, "better")):
+                out[f"auroc_{nm}"] = float(roc_auc_score(y == k, prob[:, k])) if 0 < (y == k).sum() < len(y) \
+                    else float("nan")
+    return out
+
+
 def ordinal_metrics(y, p, w=None):
     from sklearn.metrics import balanced_accuracy_score, cohen_kappa_score, f1_score, recall_score
     out = {"n": int(len(y)), "macro_f1": float(f1_score(y, p, average="macro", labels=[0, 1, 2, 3], sample_weight=w,
@@ -300,6 +324,22 @@ def predict_mil(model, bags, prepared=False, batch=64):
             p, _ = model(x, mask)
             out.append((p > 0.5).sum(1).float().cpu().numpy())
     return np.concatenate(out)
+
+
+def predict_mil_proba(model, bags, batch=64):
+    """Class probabilities from the cumulative-logit head: P(y = k) = P(y > k - 1) - P(y > k)."""
+    model.eval()
+    mu, sd = model.norm
+    bags = [torch.as_tensor(((b - mu) / sd).astype(np.float32), device=DEVICE) for b in bags]
+    out = []
+    with torch.no_grad():
+        for k in range(0, len(bags), batch):
+            x, mask = _pad(bags[k:k + batch], DEVICE)
+            p, _ = model(x, mask)
+            out.append(p.cpu().numpy())
+    gt = np.concatenate(out)
+    cum = np.c_[np.ones(len(gt)), gt, np.zeros(len(gt))]
+    return np.clip(cum[:, :-1] - cum[:, 1:], 0, 1)
 
 
 def grouped_validation(groups, test_mask, frac=0.15, seed=SEED):
