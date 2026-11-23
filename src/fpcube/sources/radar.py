@@ -23,9 +23,10 @@ from shapely.geometry import box, shape
 from fpcube import config
 
 PC_STAC = "https://planetarycomputer.microsoft.com/api/stac/v1"
-OUT = config.INTERIM / "radar" / "s1"
+OUT = config.vdir("radar") / "s1"           # later field versions: only their new or reshaped fields
 GDAL_ENV = dict(GDAL_DISABLE_READDIR_ON_OPEN="EMPTY_DIR", CPL_VSIL_CURL_ALLOWED_EXTENSIONS=".tif,.tiff",
                 GDAL_HTTP_MAX_RETRY="6", GDAL_HTTP_RETRY_DELAY="4", GDAL_HTTP_MULTIPLEX="YES", GDAL_HTTP_MERGE_CONSECUTIVE_RANGES="YES",
+                GDAL_HTTP_TIMEOUT="120", GDAL_HTTP_CONNECTTIMEOUT="30",
                 GDAL_CACHEMAX=512)
 WORKERS = int(os.environ.get("FPCUBE_S1_WORKERS", "6"))
 # Pixels below these values are not backscatter: scenes processed before IPF 2.90 (13 March 2018) carry strips of
@@ -71,7 +72,7 @@ def master_labels():
         return _MASTER["a"], _MASTER["x0"], _MASTER["y0"]
     p = OUT / f"fields_{MASTER_EPSG}_20m.tif"
     if not p.exists():
-        f = gpd.read_parquet(config.INTERIM / "fields" / "fields.parquet")[["fid", "geometry"]].to_crs(MASTER_EPSG)
+        f = gpd.read_parquet(config.extract_fields_path())[["fid", "geometry"]].to_crs(MASTER_EPSG)
         inner = f.geometry.buffer(-20)
         keep = ~inner.is_empty
         x0, y0, x1, y1 = inner[keep].total_bounds
@@ -186,8 +187,12 @@ def process(it, fields):
 
 def main():
     OUT.mkdir(parents=True, exist_ok=True)
-    fields = gpd.read_parquet(config.INTERIM / "fields" / "fields.parquet")[["fid", "geometry"]]
+    fields = gpd.read_parquet(config.extract_fields_path())[["fid", "geometry"]]
     cat = OUT / "items.parquet"
+    base_cat = config.vdir("radar", "v1.0") / "s1" / "items.parquet"
+    if not cat.exists() and base_cat.exists():               # same scenes as v1.0: reuse its catalogue
+        import shutil
+        shutil.copy(base_cat, cat)
     if cat.exists():
         items = pd.read_parquet(cat)
     else:

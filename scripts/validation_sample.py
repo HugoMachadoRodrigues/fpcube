@@ -62,7 +62,7 @@ def _random_point(poly, rng):
 
 
 def omission(rng):
-    fd = config.INTERIM / "fields"
+    fd = config.FIELDS_DIR
     with rasterio.open(fd / "field_labels.tif") as s:
         lab, tr, crs = s.read(1), s.transform, s.crs
     with rasterio.open(fd / "pasture_frequency.tif") as s:

@@ -9,6 +9,26 @@ RAW = DATA / "raw"
 INTERIM = DATA / "interim"
 RELEASE = DATA / "release"
 
+# Field-set version. v1.0 lives in INTERIM/fields, INTERIM/optical, ...; a later version (FPCUBE_FIELDS=v1.1) keeps
+# its own fields and the observations of its new or reshaped fields in INTERIM/<name>_<version> and reuses the v1.0
+# observations of the fields it did not change (see fpcube.fields.lineage).
+FIELDS_VERSION = os.environ.get("FPCUBE_FIELDS", "v1.0")
+
+
+def vdir(name, version=None):
+    v = version or FIELDS_VERSION
+    return INTERIM / name if v == "v1.0" else INTERIM / f"{name}_{v}"
+
+
+FIELDS_DIR = vdir("fields")
+
+
+def extract_fields_path():
+    """Fields whose observations must be extracted in this version: all of them in v1.0, only the new or reshaped
+    ones in a later version."""
+    p = FIELDS_DIR / "fields_extract.parquet"
+    return p if p.exists() else FIELDS_DIR / "fields.parquet"
+
 # Equal-area CRS for geometry and areas (same as the Cropland Data Layer).
 CRS = "EPSG:5070"
 
@@ -21,7 +41,7 @@ COMPOSITE_ANCHOR = "2016-01-01"          # first composite starts here
 # Cropland Data Layer classes.
 CDL_PASTURE = (176, 37)                  # Grass/Pasture, Other Hay/Non Alfalfa
 CDL_WOODY = (141, 142, 143, 152)         # forests, shrubland
-CDL_WETLAND_WOODY = (190,)
+CDL_WETLAND_WOODY = (190,)              # woody wetlands: added to the woody screen from v1.1
 CDL_WATER = (111,)
 CDL_DEVELOPED = (121, 122, 123, 124)
 CDL_CITRUS = (72,)

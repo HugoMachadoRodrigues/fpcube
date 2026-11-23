@@ -3,9 +3,15 @@
 A field is the part of a 4-connected patch of persistent-pasture pixels that lies inside one parcel, at least
 MIN_FIELD_HA in area. Patches are labelled before the split by parcel, so when a patch crosses a parcel boundary
 the part inside one parcel can itself be disconnected (connected only through the neighbouring parcel); such fields
-have n_parts > 1 (v1.0 keeps them whole, because the observation tables aggregate over the whole field). Persistent pasture: CDL Grass/Pasture or Other Hay in at least PASTURE_MIN_FRACTION
-of the PASTURE_YEARS; pixels woody in more than WOODY_MAX_YEARS of the WOODY_SCREEN_YEARS are removed
-(young pine stands are often mapped as pasture).
+have n_parts > 1 in v1.0. From v1.1 (python -m fpcube.fields v1.1) a field is one 4-connected part inside one
+parcel, and woody wetland (CDL 190) joins the woody screen. Persistent pasture: CDL Grass/Pasture or Other Hay in at
+least PASTURE_MIN_FRACTION of the PASTURE_YEARS; pixels woody in more than WOODY_MAX_YEARS of the WOODY_SCREEN_YEARS
+are removed (young pine stands are often mapped as pasture).
+
+Field identifiers stay stable across versions (lineage): a later version's field that has exactly the pixels of a
+v1.0 field keeps its id and reuses its observations; when a v1.0 field changes, its largest remaining part keeps the
+id and is re-extracted, and further parts get new ids above the v1.0 maximum. lineage.parquet records parent and
+status for every field; fields_extract.parquet holds the fields to extract.
 
 Outputs (config.INTERIM / "fields"):
   field_labels.tif            field id per 30 m CDL pixel (0 = none), EPSG:5070
@@ -129,8 +135,54 @@ def add_part_attributes(paths):
         print(p, int((g.n_parts > 1).sum()), "multipart fields", flush=True)
 
 
-def build(out_dir=None):
-    out = Path(out_dir or config.INTERIM / "fields")
+def connected_within_parcel(cand, pidx):
+    """Label 4-connected groups of candidate pixels that share a parcel (a field never crosses a parcel boundary
+    and never consists of disconnected pieces)."""
+    from skimage.measure import label
+    key = np.where(cand, pidx, 0)
+    return label(key, background=0, connectivity=1).astype(np.int64)
+
+
+def stable_ids(lab, base_labels_path):
+    """Renumber a new label raster so that fields keep their v1.0 id where possible. Returns the relabelled raster
+    and the lineage table (fid, parent_fid, status)."""
+    with rasterio.open(base_labels_path) as s:
+        old = s.read(1)
+    m = lab > 0
+    new_ids, old_ids = lab[m], old[m].astype(np.int64)
+    n_new = int(lab.max())
+    size_new = np.bincount(new_ids, minlength=n_new + 1)
+    size_old = np.bincount(old.ravel(), minlength=int(old.max()) + 1)
+    pair = pd.DataFrame({"new": new_ids, "old": old_ids}).value_counts().rename("n").reset_index()
+    parent = pair.sort_values("n").drop_duplicates("new", keep="last").set_index("new")
+    lin = pd.DataFrame({"new": np.arange(1, n_new + 1)})
+    lin = lin[size_new[1:] > 0]
+    lin["parent_fid"] = parent.old.reindex(lin.new).fillna(0).astype(np.int64).values
+    lin["n_pixels"] = size_new[lin.new]
+    lin["same"] = (lin.parent_fid > 0) & (size_new[lin.new] == size_old[lin.parent_fid]) & \
+        (parent.n.reindex(lin.new).values == size_new[lin.new])
+    lin = lin.sort_values(["parent_fid", "n_pixels"], ascending=[True, False])
+    lin["rank"] = lin.groupby("parent_fid").cumcount()
+    keep_old = (lin.parent_fid > 0) & (lin["rank"] == 0)
+    lin["fid"] = np.where(keep_old, lin.parent_fid, 0)
+    nxt = int(old.max()) + 1
+    k = ~keep_old
+    lin.loc[k, "fid"] = np.arange(nxt, nxt + int(k.sum()))
+    lin["status"] = np.where(lin.same, "unchanged", np.where(keep_old, "reshaped", "new"))
+    remap = np.zeros(n_new + 1, np.int64)
+    remap[lin.new.to_numpy()] = lin.fid.to_numpy()
+    present = np.nonzero(size_old)[0]
+    removed = np.setdiff1d(present[present > 0], lin.parent_fid.to_numpy())
+    out = lin[["fid", "parent_fid", "status", "n_pixels"]].sort_values("fid").reset_index(drop=True)
+    gone = pd.DataFrame({"fid": removed, "parent_fid": removed, "status": "removed", "n_pixels": 0})
+    return remap[lab], pd.concat([out, gone], ignore_index=True)
+
+
+def build(out_dir=None, version="v1.0"):
+    """v1.0: fields as released in v1.0. v1.1: one connected part per field, woody wetland screened, ids kept
+    stable against v1.0 (see the module docstring)."""
+    v11 = version != "v1.0"
+    out = Path(out_dir or config.vdir("fields", version))
     out.mkdir(parents=True, exist_ok=True)
     years = config.PASTURE_YEARS
     epsg, transform, width, height = _check_grids(sorted(set(years + config.WOODY_SCREEN_YEARS)))
@@ -146,7 +198,7 @@ def build(out_dir=None):
         print("cdl", y, flush=True)
     woody = np.zeros((height, width), np.uint8)
     for y in config.WOODY_SCREEN_YEARS:
-        woody += np.isin(_read(y), config.CDL_WOODY)
+        woody += np.isin(_read(y), config.CDL_WOODY + (config.CDL_WETLAND_WOODY if v11 else ()))
     persistent = freq >= int(np.ceil(config.PASTURE_MIN_FRACTION * len(years)))
     removed_woody = persistent & (woody > config.WOODY_MAX_YEARS)
     keep = persistent & ~removed_woody
@@ -175,13 +227,16 @@ def build(out_dir=None):
     print("parcels rasterized", flush=True)
 
     cand = keep & (pidx > 0)
-    comp, ncomp = ndimage.label(cand, structure=[[0, 1, 0], [1, 1, 1], [0, 1, 0]])
-    # split components that span several parcels: unique (component, parcel) pairs
-    key = comp.astype(np.int64) * (len(parcels) + 1) + pidx
-    key[~cand] = 0
-    uniq, inv = np.unique(key, return_inverse=True)
-    lab = inv.reshape(key.shape).astype(np.int64)  # 0 stays 0 because uniq[0] == 0
-    del key, inv
+    if v11:
+        lab = connected_within_parcel(cand, pidx)
+    else:
+        comp, ncomp = ndimage.label(cand, structure=[[0, 1, 0], [1, 1, 1], [0, 1, 0]])
+        # split components that span several parcels: unique (component, parcel) pairs
+        key = comp.astype(np.int64) * (len(parcels) + 1) + pidx
+        key[~cand] = 0
+        uniq, inv = np.unique(key, return_inverse=True)
+        lab = inv.reshape(key.shape).astype(np.int64)  # 0 stays 0 because uniq[0] == 0
+        del key, inv
     counts = np.bincount(lab.ravel())
     min_px = int(np.ceil(config.MIN_FIELD_HA / px_ha))
     small = counts < min_px
@@ -194,6 +249,11 @@ def build(out_dir=None):
     lab = remap[lab]
     nfield = len(kept)
     print("fields", nfield, flush=True)
+    lineage = None
+    if v11:
+        lab, lineage = stable_ids(lab, config.vdir("fields", "v1.0") / "field_labels.tif")
+        nfield = int(lab.max())                        # ids are no longer contiguous
+        print(lineage.status.value_counts().to_dict(), flush=True)
     with rasterio.open(out / "field_labels.tif", "w", dtype="int32", nodata=0, **prof) as d:
         d.write(lab, 1)
 
@@ -239,6 +299,10 @@ def build(out_dir=None):
             "flag_few_interior", "flag_landuse_change"] + list(annual) + ["geometry"]
     gdf = gdf[cols].sort_values("fid")
     gdf.to_parquet(out / "fields.parquet")
+    if lineage is not None:
+        lineage.to_parquet(out / "lineage.parquet", index=False)
+        ext = lineage[lineage.status.isin(["reshaped", "new"])].fid
+        gdf[gdf.fid.isin(ext)].to_parquet(out / "fields_extract.parquet")
 
     stats = {
         "cdl_years": years, "woody_screen_years": config.WOODY_SCREEN_YEARS,
@@ -250,7 +314,9 @@ def build(out_dir=None):
         "in_fields_ha": float((lab > 0).sum() * px_ha),
         "n_parcels": int(len(parcels)),
         "n_grazing_parcels": int(parcels.is_grazing.sum()),
-        "n_fields": int(nfield),
+        "n_fields": int(len(gdf)),
+        "version": version,
+        **({"lineage": lineage.status.value_counts().to_dict()} if lineage is not None else {}),
         "n_fields_tier_A": int((gdf.tier == "A").sum()),
         "area_ha_tier_A": float(gdf.loc[gdf.tier == "A", "area_ha"].sum()),
         "area_ha_tier_B": float(gdf.loc[gdf.tier == "B", "area_ha"].sum()),
@@ -267,4 +333,4 @@ if __name__ == "__main__":
     if sys.argv[1:2] == ["--add-part-attributes"]:
         add_part_attributes(sys.argv[2:])
     else:
-        build()
+        build(version=(sys.argv[1:2] or ["v1.0"])[0])

@@ -473,9 +473,7 @@ def quality(rel, cube, fields):
            "and the set of relative orbits differs from the field's previous observed period in {oc:.0f}\\,\\% of the "
            "composites, so the incidence angle varies within and between periods; the per-acquisition table keeps the "
            "orbit of every value. Because indices are computed per pixel and limited to $[-1, 1]$, NDVI composites reach "
-           "$\\pm 1$ in {sat} of the observed cells. {nmp} fields ({mps:.0f}\\,\\% of the field area) consist of more than "
-           "one 4-connected part, because a pasture patch crossing a parcel boundary can split the part inside one "
-           "parcel; the smaller parts total {mha} ha (\\texttt{{n\\_parts}}). PRISM daily values become stable about "
+           "$\\pm 1$ in {sat} of the observed cells. {parts}PRISM daily values become stable about "
            "six months after the date; the record was retrieved on {got}, so values after {prov} are provisional and may "
            "be revised in later PRISM releases.").format(
         nn=fmt_int(stats["n_no_observations"]),
@@ -483,8 +481,12 @@ def quality(rel, cube, fields):
         mo=100 * stats["radar_mixed_orbit_frac"], md=100 * stats["radar_mixed_direction_frac"],
         oc=100 * stats["radar_orbit_change_consecutive_frac"],
         sat=(f"{sat:.3f}\\,\\%" if sat >= 0.001 else "fewer than 0.001\\,\\%"),
-        nmp=fmt_int(stats["n_multipart_fields"]), mps=100 * stats["multipart_area_share"],
-        mha=fmt_int(int(round(stats["minor_parts_ha"], -2))),
+        parts=(("{nmp} fields ({mps:.0f}\\,\\% of the field area) consist of more than one 4-connected part, "
+                "because a pasture patch crossing a parcel boundary can split the part inside one parcel; the smaller "
+                "parts total {mha} ha (\\texttt{{n\\_parts}}). ").format(
+                    nmp=fmt_int(stats["n_multipart_fields"]), mps=100 * stats["multipart_area_share"],
+                    mha=fmt_int(int(round(stats["minor_parts_ha"], -2))))
+               if stats["n_multipart_fields"] else "Every field is a single 4-connected part. "),
         got=pd.Timestamp(stats["prism_retrieved"]).strftime("%-d %B %Y"),
         prov=pd.Timestamp(stats["prism_provisional_from"]).strftime("%-d %B %Y"))
     return stats, txt
@@ -518,14 +520,17 @@ def quality_by_stratum(cube, fields, counts):
 def delineation_accounting(fields):
     """Area and units after each step of the delineation (from fields.build's delineation_stats.json) and the woody
     wetland area that the woody screen did not remove (CDL class 190 is not among the screened classes)."""
-    st = json.loads((config.INTERIM / "fields" / "delineation_stats.json").read_text())
-    lab_p = config.INTERIM / "fields" / "field_labels.tif"
+    st = json.loads((config.FIELDS_DIR / "delineation_stats.json").read_text())
+    lab_p = config.FIELDS_DIR / "field_labels.tif"
+    v11 = st.get("version", "v1.0") != "v1.0"
+    woody = "141, 142, 143, 152, 190" if v11 else "141, 142, 143, 152"
+    split = "into connected parts" if v11 else "by parcel"
     out = {"steps": [
         {"step": "Persistent pasture (CDL 176 or 37 in >= 6 of 10 years, 2016-2025)", "area_ha": st["persistent_pasture_ha"]},
-        {"step": "Removed: woody (CDL 141, 142, 143, 152) in >= 2 of 2012-2016", "area_ha": -st["removed_by_woody_screen_ha"]},
+        {"step": f"Removed: woody (CDL {woody}) in >= 2 of 2012-2016", "area_ha": -st["removed_by_woody_screen_ha"]},
         {"step": "Removed: outside any parcel of the two parcel layers",
          "area_ha": -(st["kept_pasture_ha"] - st["kept_in_grazing_parcels_ha"])},
-        {"step": "Removed: parts smaller than 2 ha after the split by parcel",
+        {"step": f"Removed: parts smaller than 2 ha after the split {split}",
          "area_ha": -(st["kept_in_grazing_parcels_ha"] - st["in_fields_ha"])},
         {"step": "Fields", "area_ha": st["in_fields_ha"], "n": st["n_fields"]}]}
     if lab_p.exists():

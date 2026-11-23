@@ -15,6 +15,10 @@ Clear pixel (HLS v2 Fmask bits): not cloud (1), not adjacent to cloud/shadow (2)
 not snow/ice (4), not cirrus (0), aerosol level not high (6-7 != 3). Water (bit 5) is kept and reported.
 
 Output: config.INTERIM/optical/<tile>/<year>.parquet (one row per field x acquisition) and a done-list.
+
+In a later field version (FPCUBE_FIELDS=v1.1) only the new or reshaped fields are extracted, into
+INTERIM/optical_<version>, and no shift is estimated: it is a property of the granule and is taken from the v1.0
+records of the same granule when the cube is built.
 """
 import json
 import os
@@ -37,11 +41,12 @@ BANDS = {"S30": {"blue": "B02", "green": "B03", "red": "B04", "nir": "B8A", "swi
          "L30": {"blue": "B02", "green": "B03", "red": "B04", "nir": "B05", "swir1": "B06", "swir2": "B07"}}
 PC_COL = {"S30": "hls2-s30", "L30": "hls2-l30"}
 PC_START = "2020-01-01"
-OUT = config.INTERIM / "optical"
+OUT = config.vdir("optical")
+SPARSE = config.FIELDS_VERSION != "v1.0"      # later versions: no reference scene, no shift estimate
 
 GDAL_ENV = dict(GDAL_DISABLE_READDIR_ON_OPEN="EMPTY_DIR", CPL_VSIL_CURL_ALLOWED_EXTENSIONS=".tif",
                 GDAL_HTTP_MAX_RETRY="6", GDAL_HTTP_RETRY_DELAY="4", GDAL_HTTP_MULTIPLEX="YES",
-                GDAL_HTTP_NETRC="YES",
+                GDAL_HTTP_NETRC="YES", GDAL_HTTP_TIMEOUT="120", GDAL_HTTP_CONNECTTIMEOUT="30",
                 GDAL_HTTP_COOKIEFILE=str(config.DATA / ".gdal_cookies"),
                 GDAL_HTTP_COOKIEJAR=str(config.DATA / ".gdal_cookies"))
 WORKERS = int(os.environ.get("FPCUBE_HLS_WORKERS", "12"))   # images read at once; the time goes into network waits
@@ -225,6 +230,11 @@ class Tile:
         # reference: walk the 2021-2023 S30 scenes from least cloudy and take the first one whose clear pixels cover
         # >= 60 % of the field pixels (else the best of the first 40). Cloud percentages ignore swath edges, so the
         # least cloudy scenes are often thin slivers that miss the fields.
+        if SPARSE:                                     # no shift is estimated here: no reference scene needed
+            self.ref_item, self.ref_nir, self.ref_clear_frac = first, None, float("nan")
+            self.done_path = self.dir / "done.json"
+            self.done = set(json.loads(self.done_path.read_text())) if self.done_path.exists() else set()
+            return
         best, best_n, n_has = None, -1, int(self.has.sum())
         for c in cands.itertuples(index=False):
             fmc = fm if c.id == first.id else _read(c.hrefs["Fmask"], c.host)[0]
@@ -243,6 +253,9 @@ class Tile:
         self.done = set(json.loads(self.done_path.read_text())) if self.done_path.exists() else set()
 
     def process(self, it):
+        return self.process_window(it)
+
+    def process_window(self, it):
         fm, _ = _read(it.hrefs["Fmask"], it.host)
         cl = clear_mask(fm) & self.has
         n_tot_px = self.has & (fm != 255)
@@ -259,11 +272,18 @@ class Tile:
             arrs[k] = np.where(arrs[k] == -9999, np.nan, arrs[k] * 1e-4).astype(np.float32)
         valid = m & np.all([np.isfinite(a) for a in arrs.values()], axis=0)
         idx = self.idx[r0:r1, c0:c1][valid]
+        b = {k: v[valid] for k, v in arrs.items()}
+        water = ((fm >> 5) & 1).astype(bool)[r0:r1, c0:c1][valid]
+        nir_clear = np.where(clear_mask(fm)[r0:r1, c0:c1], arrs["nir"], np.nan)
+        shift = phase_shift(self.ref_nir[r0:r1, c0:c1], nir_clear) \
+            if self.ref_nir is not None and (r1 - r0) >= 64 and (c1 - c0) >= 64 else (np.nan, np.nan, np.nan)
+        return self._aggregate(it, idx, b, water, n_tot_px, shift)
+
+    def _aggregate(self, it, idx, b, water, n_tot_px, shift):
         n = len(self.fids)
         cnt = np.bincount(idx, minlength=n)
         if cnt.sum() == 0:
             return None
-        b = {k: v[valid] for k, v in arrs.items()}
         with np.errstate(divide="ignore", invalid="ignore"):
             ind = {"ndvi": (b["nir"] - b["red"]) / (b["nir"] + b["red"]),
                    "evi": 2.5 * (b["nir"] - b["red"]) / (b["nir"] + 6 * b["red"] - 7.5 * b["blue"] + 1),
@@ -277,12 +297,9 @@ class Tile:
                 out[k] = np.bincount(idx, weights=v, minlength=n) / cnt
             s2 = np.bincount(idx, weights=ind["ndvi"] ** 2, minlength=n) / cnt
             out["ndvi_sd"] = np.sqrt(np.maximum(s2 - out["ndvi"] ** 2, 0))
-        water = ((fm >> 5) & 1).astype(bool)[r0:r1, c0:c1][valid]
         out["water_frac"] = np.bincount(idx, weights=water, minlength=n) / np.maximum(cnt, 1)
         tot = np.bincount(self.idx[n_tot_px], minlength=n)
-        nir_clear = np.where(clear_mask(fm)[r0:r1, c0:c1], arrs["nir"], np.nan)
-        dy, dx, pk = phase_shift(self.ref_nir[r0:r1, c0:c1], nir_clear) if (r1 - r0) >= 64 and (c1 - c0) >= 64 \
-            else (np.nan, np.nan, np.nan)
+        dy, dx, pk = shift
         keep = cnt > 0
         df = pd.DataFrame({k: v[keep] for k, v in out.items()})
         df.insert(0, "fid", self.fids[keep])
@@ -342,10 +359,14 @@ class Tile:
 
 
 def main(tiles=None):
-    fields = gpd.read_parquet(config.INTERIM / "fields" / "fields.parquet")
+    fields = gpd.read_parquet(config.extract_fields_path())
     bbox = list(fields.to_crs(4326).total_bounds)
     cat_path = OUT / "items.parquet"
     OUT.mkdir(parents=True, exist_ok=True)
+    base_cat = config.vdir("optical", "v1.0") / "items.parquet"
+    if not cat_path.exists() and base_cat.exists():          # same granules as v1.0: reuse its catalogue
+        import shutil
+        shutil.copy(base_cat, cat_path)
     if cat_path.exists():
         items = pd.read_parquet(cat_path)
         items["hrefs"] = items.hrefs.map(json.loads)

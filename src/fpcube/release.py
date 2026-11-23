@@ -54,7 +54,7 @@ def build_catalog(rel):
         title=f"Florida Pasture Cube {rel.name}", keywords=["pasture", "grazing", "Florida", "HLS", "Sentinel-1",
                                                             "data cube", "machine learning", "benchmark"])
     cat.add_child(col)
-    groups = {"fields": ["fields.parquet"], "cube": ["cube.zarr"],
+    groups = {"fields": ["fields.parquet"] + (["lineage.parquet"] if (rel / "lineage.parquet").exists() else []), "cube": ["cube.zarr"],
               "optical-observations": sorted(p.name for p in (rel / "optical_observations").glob("*.parquet")),
               "radar-observations": sorted(p.name for p in (rel / "radar_observations").glob("*.parquet")),
               "labels": sorted(p.name for p in (rel / "labels").glob("*.parquet")),
@@ -123,10 +123,7 @@ Following Gebru et al. (2021), *Datasheets for datasets*.
   were not assessed (`none`) and are kept (`qa_geometry` is True for them). Indices are computed per pixel and averaged over the field's clear
   pixels; in v1.0 a pixel whose index is undefined (zero denominator) counts as 0 and values are clipped to
   [-1, 1] before averaging (rare: see the paper).
-- **Multipart fields.** {n_multi} fields have more than one 4-connected part (`n_parts`, `largest_part_frac`): a
-  pasture patch crossing a parcel boundary can leave a disconnected part inside one parcel. Their observations
-  aggregate over all parts.
-- **Labels:** US Drought Monitor (county-week), NASS pasture condition (state-week), hurricane tracks.
+{multipart}{lineage}- **Labels:** US Drought Monitor (county-week), NASS pasture condition (state-week), hurricane tracks.
 - **Missing data.** Optical gaps longer than 30 days are left empty on purpose. Radar coverage is thinner in
   2022-2024 after the Sentinel-1B failure. `water_table_min_cm` is empty where gNATSGO records no water table in
   the soil profile (mostly excessively and well-drained soils): read it as deeper than about 2 m, not as unknown.
@@ -202,6 +199,24 @@ def prism_retrieved(rel):
     return got
 
 
+MULTIPART = """- **Multipart fields.** {n} fields have more than one 4-connected part (`n_parts`, `largest_part_frac`): a
+  pasture patch crossing a parcel boundary can leave a disconnected part inside one parcel. Their observations
+  aggregate over all parts.
+"""
+LINEAGE = """- **Field identifiers across versions.** `lineage.parquet` links every field id to the version 1.0 field it
+  comes from (`parent_fid`) with `status`: `unchanged` (same pixels, same id), `reshaped` (the largest part of a
+  1.0 field keeps its id), `new` (a further part of a 1.0 field, id above the 1.0 maximum) or `removed` (1.0 id
+  no longer used). Observations of unchanged fields are those of version 1.0.
+"""
+
+
+def copy_lineage(rel):
+    """Copy the field lineage of the release's field version (none for v1.0)."""
+    src = config.vdir("fields", rel.name) / "lineage.parquet"
+    if rel.name != "v1.0" and src.exists():
+        shutil.copy2(src, rel / "lineage.parquet")
+
+
 FIELD_COLUMNS = {
     "field_id": ("", "field identifier FPCnnnnnn; joins the cube's field coordinate", "none"),
     "fid": ("", "integer field id; joins the observation tables", "none"),
@@ -262,12 +277,16 @@ def datasheet(rel):
     summ = json.loads((rel / "validation" / "summary.json").read_text())
     code = summ.get("code", {})
     gna = summ["stats"]["coverage"].get("geom_not_assessed_frac")
+    n_multi = int((f.n_parts > 1).sum())
     txt = DATASHEET.format(version=rel.name, prism_date=prism_retrieved(rel), n_fields=len(f),
                            n_a=int((f.tier == "A").sum()),
                            n_b=int((f.tier == "B").sum()), n_periods=len(t), start=t[0].date(),
                            end=(t[-1] + pd.Timedelta(days=config.COMPOSITE_DAYS - 1)).date(),
                            geom_na=f"{100 * gna:.1f} %" if gna is not None else "some",
-                           n_multi=int((f.n_parts > 1).sum()), n_wt_missing=int(f.water_table_min_cm.isna().sum()),
+                           multipart=MULTIPART.format(n=n_multi) if n_multi else
+                           "- **Fields are single parts.** Every field is one 4-connected part (`n_parts` = 1).\n",
+                           lineage=LINEAGE if (rel / "lineage.parquet").exists() else "",
+                           n_wt_missing=int(f.water_table_min_cm.isna().sum()),
                            commit=code.get("commit", "?") + (" (with local changes)" if code.get(
                                "code_modified_since_commit") else ""),
                            code_hash=code.get("code_sha256_16", "?"), dictionary=dictionary(rel))
@@ -322,6 +341,7 @@ if __name__ == "__main__":
     if "--deposit" in sys.argv:
         print(deposit(rel))
     else:
+        copy_lineage(rel)
         datasheet(rel)
         print(build_catalog(rel))
         checksums(rel)

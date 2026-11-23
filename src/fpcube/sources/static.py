@@ -23,7 +23,8 @@ from rasterio.warp import reproject, Resampling
 from fpcube import config
 
 PC_STAC = "https://planetarycomputer.microsoft.com/api/stac/v1"
-OUT = config.INTERIM / "static"
+OUT = config.vdir("static")                    # per-field tables of this field version
+RASTERS = config.vdir("static", "v1.0") / "terrain"   # terrain rasters are field-independent: built once
 DRAIN = {"Excessively drained": 1, "Somewhat excessively drained": 2, "Well drained": 3,
          "Moderately well drained": 4, "Somewhat poorly drained": 5, "Poorly drained": 6,
          "Very poorly drained": 7, "Subaqueous": 8}
@@ -38,7 +39,7 @@ def _cat():
 
 
 def _fields():
-    return gpd.read_parquet(config.INTERIM / "fields" / "fields.parquet")[["fid", "geometry"]]
+    return gpd.read_parquet(config.extract_fields_path())[["fid", "geometry"]]
 
 
 def clip_to(gdf, b, inset=1.0):
@@ -103,7 +104,7 @@ def soil():
 
 
 def dem_mosaic():
-    out = OUT / "terrain"
+    out = RASTERS
     out.mkdir(parents=True, exist_ok=True)
     target = out / "dem30_5070.tif"
     if target.exists():
@@ -113,7 +114,7 @@ def dem_mosaic():
              if it.properties.get("gsd") == 30]
     srcs = [rasterio.open(it.assets["data"].href) for it in items]
     mos, tr = merge(srcs)
-    with rasterio.open(config.INTERIM / "fields" / "field_labels.tif") as ref:
+    with rasterio.open(config.vdir("fields", "v1.0") / "field_labels.tif") as ref:
         dst = np.full((ref.height, ref.width), np.nan, np.float32)
         reproject(mos[0], dst, src_transform=tr, src_crs=srcs[0].crs, dst_transform=ref.transform,
                   dst_crs=ref.crs, resampling=Resampling.bilinear, src_nodata=srcs[0].nodata, dst_nodata=np.nan)
@@ -133,7 +134,7 @@ def hydro_dem():
     inland cells below sea level (pits, quarries) are kept.
     """
     from scipy import ndimage
-    out = OUT / "terrain"
+    out = RASTERS
     target = out / "dem30_5070_hydro.tif"
     if target.exists():
         return target
@@ -167,7 +168,7 @@ def _wbt(tool, wd, **kw):
 
 
 def terrain_rasters():
-    out = OUT / "terrain"
+    out = RASTERS
     dem = dem_mosaic()
     hdem = hydro_dem()
     p = {k: out / f"{k}.tif" for k in ("breached", "d8", "acc", "streams", "hand", "slope", "sca", "twi")}
@@ -221,6 +222,7 @@ def wetness_index(sca, slope, out):
 
 def terrain():
     out = OUT / "terrain"
+    out.mkdir(parents=True, exist_ok=True)
     dem, p = terrain_rasters()
     f = _fields()
     d = _zonal(str(dem), f, ["mean", "min", "max"]).rename(columns={"mean": "elev_mean_m", "min": "elev_min_m",

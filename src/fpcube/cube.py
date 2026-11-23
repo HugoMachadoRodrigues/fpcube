@@ -95,21 +95,26 @@ def period_index(dates):
     return ((pd.to_datetime(dates) - a).dt.days // config.COMPOSITE_DAYS).astype(int)
 
 
-def _files(kind):
+def _files(kind, version=None):
     if kind == "optical":
-        fs = [f for f in (config.INTERIM / "optical").glob("T*/*.parquet")]
+        fs = [f for f in config.vdir("optical", version).glob("T*/*.parquet")]
     else:
-        fs = list((config.INTERIM / "radar" / "s1").glob("2*/*.parquet"))
+        fs = list((config.vdir("radar", version) / "s1").glob("2*/*.parquet"))
     return sorted(fs)
 
 
+def unchanged_fids():
+    """Fields of this version whose pixels are those of the v1.0 field with the same id (None in v1.0)."""
+    if config.FIELDS_VERSION == "v1.0":
+        return None
+    lin = pd.read_parquet(config.FIELDS_DIR / "lineage.parquet")
+    return lin.loc[lin.status == "unchanged", "fid"].to_numpy()
+
+
 def _load(kind, lo=None, hi=None, start=None, end=None):
-    """Observations from the interim tables, optionally only fids in [lo, hi) and dates in [start, end)."""
+    """Observations from the interim tables, optionally only fids in [lo, hi) and dates in [start, end). In a later
+    field version: the version's own records plus the v1.0 records of its unchanged fields."""
     import pyarrow.dataset as ds
-    files = _files(kind)
-    if not files:
-        return pd.DataFrame()
-    dset = ds.dataset([str(f) for f in files], format="parquet")
     flt = None
     for cond in ((ds.field("fid") >= lo) if lo is not None else None,
                  (ds.field("fid") < hi) if hi is not None else None,
@@ -117,9 +122,21 @@ def _load(kind, lo=None, hi=None, start=None, end=None):
                  (ds.field("date") < pd.Timestamp(end)) if end is not None else None):
         if cond is not None:
             flt = cond if flt is None else flt & cond
-    d = dset.to_table(filter=flt).to_pandas()
-    if len(d):
-        d["date"] = pd.to_datetime(d.date)
+    keep = unchanged_fids()
+    sets = [(_files(kind), flt)]
+    if keep is not None:
+        base_flt = ds.field("fid").isin(keep.tolist())
+        sets = [(_files(kind), flt), (_files(kind, "v1.0"), base_flt if flt is None else flt & base_flt)]
+    parts = []
+    for files, f_ in sets:
+        if files:
+            t = ds.dataset([str(f) for f in files], format="parquet").to_table(filter=f_).to_pandas()
+            if len(t):
+                parts.append(t)
+    if not parts:
+        return pd.DataFrame()
+    d = pd.concat(parts, ignore_index=True)
+    d["date"] = pd.to_datetime(d.date)
     return d
 
 
@@ -131,14 +148,35 @@ GEOMETRY_STATES = ("pass", "fail", "not_assessed")
 MIN_SCENE_PEAK = 0.1      # scene-level estimates with a weaker phase-correlation peak are noise (72 of 74 'fails')
 
 
+def item_shifts_v10():
+    """Granule shifts estimated over field windows during the v1.0 extraction (one per granule). Later field
+    versions read only blocks, estimate no shift, and take it from here: the shift is a property of the granule."""
+    cache = config.FIELDS_DIR / "item_shifts_v1.0.parquet"
+    if cache.exists():
+        return pd.read_parquet(cache)
+    import pyarrow.dataset as ds
+    files = [str(f) for f in _files("optical", "v1.0")]
+    t = ds.dataset(files, format="parquet").to_table(columns=["item", "shift_row", "shift_col", "shift_peak"],
+                                                       filter=ds.field("shift_row").is_valid()).to_pandas()
+    t = t.drop_duplicates("item")
+    t.to_parquet(cache, index=False)
+    return t
+
+
 def load_scene_shifts():
-    """Scene-level shift estimates (fpcube.sources.scene_shift) for granules whose field window was too small."""
-    parts = [pd.read_parquet(p) for p in (config.INTERIM / "optical" / "scene_shift").glob("T*.parquet")]
-    if not parts:
-        return None
-    s = pd.concat(parts, ignore_index=True).drop_duplicates("item")
-    s = s[s.shift_peak >= MIN_SCENE_PEAK]                   # weaker peaks: the granule stays not assessed
-    return s[["item", "shift_row", "shift_col", "shift_peak"]].dropna(subset=["shift_row"])
+    """Granule shifts to fill records extracted without one: scene-level estimates (fpcube.sources.scene_shift) for
+    granules whose field window was too small, and, in later field versions, the v1.0 field-window estimate of the
+    same granule first (column 'scope')."""
+    parts = [pd.read_parquet(p) for p in (config.vdir("optical", "v1.0") / "scene_shift").glob("T*.parquet")]
+    s = None
+    if parts:
+        s = pd.concat(parts, ignore_index=True).drop_duplicates("item")
+        s = s[s.shift_peak >= MIN_SCENE_PEAK]               # weaker peaks: the granule stays not assessed
+        s = s[["item", "shift_row", "shift_col", "shift_peak"]].dropna(subset=["shift_row"]).assign(scope="scene")
+    if config.FIELDS_VERSION != "v1.0":
+        f = item_shifts_v10().assign(scope="fields")
+        s = f if s is None else pd.concat([f, s], ignore_index=True).drop_duplicates("item")
+    return s
 
 
 def screen_optical(d, scene=None):
@@ -155,7 +193,7 @@ def screen_optical(d, scene=None):
         fill = d.shift_row.isna().to_numpy() & m.shift_row.notna().to_numpy()
         for c in ("shift_row", "shift_col", "shift_peak"):
             d[c] = np.where(fill, m[c].to_numpy(), d[c].to_numpy())
-        scope[fill] = "scene"
+        scope[fill] = m["scope"].to_numpy()[fill] if "scope" in m else "scene"
     ok_clear = (d.n_clear_px >= np.maximum(3, 0.3 * d.n_field_px))
     sh = np.hypot(d.shift_row, d.shift_col)                     # NaN when the shift was not estimated
     assessed = sh.notna()
@@ -343,16 +381,24 @@ def weather_composites(fields, times):
 
 
 def static_table():
-    f = gpd.read_parquet(config.INTERIM / "fields" / "fields.parquet")
-    sdir = config.INTERIM / "static"
-    for p in (sdir / "soil" / "soil_by_field.parquet", sdir / "terrain" / "terrain_by_field.parquet",
-              sdir / "wetlands" / "wetlands_by_field.parquet"):
+    f = gpd.read_parquet(config.FIELDS_DIR / "fields.parquet")
+    keep = unchanged_fids()
+    for rel_p in ("soil/soil_by_field.parquet", "terrain/terrain_by_field.parquet",
+                  "wetlands/wetlands_by_field.parquet"):
+        parts = []
+        p = config.vdir("static") / rel_p
         if p.exists():
-            f = f.merge(pd.read_parquet(p), on="fid", how="left")
+            parts.append(pd.read_parquet(p))
+        if keep is not None and (config.vdir("static", "v1.0") / rel_p).exists():
+            b = pd.read_parquet(config.vdir("static", "v1.0") / rel_p)
+            parts.append(b[b.fid.isin(keep)])
+        if parts:
+            f = f.merge(pd.concat(parts, ignore_index=True).drop_duplicates("fid"), on="fid", how="left")
     return f
 
 
-def build(version="v1.0"):
+def build(version=None):
+    version = version or config.FIELDS_VERSION
     rel = config.RELEASE / version
     if rel.exists():
         shutil.rmtree(rel)

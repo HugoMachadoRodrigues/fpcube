@@ -29,7 +29,7 @@ from fpcube import config
 from fpcube.sources import optical as O
 
 BLOCK = 512
-OUT = O.OUT / "scene_shift"
+OUT = config.vdir("optical", "v1.0") / "scene_shift"
 
 
 def best_block(clear, ref_ok, block=BLOCK, step=128):
@@ -80,7 +80,7 @@ def main(check=0, version="v1.0"):
     items = pd.read_parquet(O.OUT / "items.parquet")
     items["hrefs"] = items.hrefs.map(json.loads)
     items = items[items.id.isin(set(want.item))]
-    fields = gpd.read_parquet(config.INTERIM / "fields" / "fields.parquet")
+    fields = gpd.read_parquet(config.vdir("fields", "v1.0") / "fields.parquet")   # the extraction's tile reference
     OUT.mkdir(parents=True, exist_ok=True)
     rows_check = []
     for tname, g in items.groupby("tile"):

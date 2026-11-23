@@ -121,7 +121,7 @@ def counties():
 
 
 def fields_table(rel):
-    p = rel / "fields.parquet" if rel and (rel / "fields.parquet").exists() else config.INTERIM / "fields" / "fields.parquet"
+    p = rel / "fields.parquet" if rel and (rel / "fields.parquet").exists() else config.FIELDS_DIR / "fields.parquet"
     return gpd.read_parquet(p)
 
 
