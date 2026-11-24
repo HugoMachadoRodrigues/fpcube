@@ -96,6 +96,7 @@ def period_index(dates):
 
 
 def _files(kind, version=None):
+    version = config.obs_version(version)
     if kind == "optical":
         fs = [f for f in config.vdir("optical", version).glob("T*/*.parquet")]
     else:
@@ -386,7 +387,7 @@ def static_table():
     for rel_p in ("soil/soil_by_field.parquet", "terrain/terrain_by_field.parquet",
                   "wetlands/wetlands_by_field.parquet"):
         parts = []
-        p = config.vdir("static") / rel_p
+        p = config.vdir("static", config.obs_version()) / rel_p
         if p.exists():
             parts.append(pd.read_parquet(p))
         if keep is not None and (config.vdir("static", "v1.0") / rel_p).exists():

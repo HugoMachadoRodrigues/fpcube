@@ -328,9 +328,67 @@ def build(out_dir=None, version="v1.0"):
     return gdf
 
 
+def select(version="v1.2"):
+    """A field selection (config.SELECTION): the base version's fields without land-use change and, in tier B, with
+    pasture_years_mean of at least config.TIER_B_MIN_PASTURE_YEARS. Ids, geometries and observations are the base's;
+    the lineage still refers to v1.0, with the v1.0 fields that have no kept successor marked 'removed'."""
+    import shutil
+    base = config.SELECTION[version]
+    bdir, out = config.vdir("fields", base), config.vdir("fields", version)
+    out.mkdir(parents=True, exist_ok=True)
+    tmp = Path("/private/tmp/fpcube_select")
+    tmp.mkdir(exist_ok=True)
+    f = gpd.read_parquet(bdir / "fields.parquet")
+    chg = f.flag_landuse_change.to_numpy()
+    low_b = (f.tier == "B").to_numpy() & (f.pasture_years_mean < config.TIER_B_MIN_PASTURE_YEARS).to_numpy() & ~chg
+    g = f[~chg & ~low_b]
+
+    with rasterio.open(bdir / "field_labels.tif") as s_:
+        lab, prof = s_.read(1), s_.profile
+    ok = np.zeros(int(lab.max()) + 1, bool)
+    ok[g.fid.to_numpy()] = True
+    lab[~ok[lab]] = 0
+    with rasterio.open(tmp / "field_labels.tif", "w", **prof) as d:
+        d.write(lab, 1)
+    shutil.move(str(tmp / "field_labels.tif"), str(out / "field_labels.tif"))
+    for name in ("pasture_frequency.tif", "persistent_pasture.tif", "item_shifts_v1.0.parquet"):
+        if (bdir / name).exists():
+            shutil.copy2(bdir / name, out / name)
+    g.to_parquet(out / "fields.parquet")
+
+    lin = pd.read_parquet(bdir / "lineage.parquet")
+    kept = lin[lin.fid.isin(g.fid) & (lin.status != "removed")]
+    v10 = set(lin.parent_fid[lin.parent_fid > 0]) | set(lin.fid[lin.status == "removed"])
+    gone = np.array(sorted(v10 - set(kept.parent_fid)), np.int64)
+    gone = pd.DataFrame({"fid": gone, "parent_fid": gone, "status": "removed", "n_pixels": 0})
+    pd.concat([kept, gone], ignore_index=True).to_parquet(out / "lineage.parquet", index=False)
+
+    st = json.loads((bdir / "delineation_stats.json").read_text())
+    ha = lambda m: float(f.area_ha[m].sum())
+    st.update({
+        "version": version,
+        "selection": {"base": base, "tier_b_min_pasture_years": config.TIER_B_MIN_PASTURE_YEARS,
+                      "removed_landuse_change_n": int(chg.sum()), "removed_landuse_change_ha": ha(chg),
+                      "removed_tier_b_persistence_n": int(low_b.sum()), "removed_tier_b_persistence_ha": ha(low_b)},
+        "selected_ha": float(g.area_ha.sum()),
+        "n_fields": int(len(g)),
+        "lineage": pd.concat([kept, gone]).status.value_counts().to_dict(),
+        "n_fields_tier_A": int((g.tier == "A").sum()),
+        "area_ha_tier_A": float(g.loc[g.tier == "A", "area_ha"].sum()),
+        "area_ha_tier_B": float(g.loc[g.tier == "B", "area_ha"].sum()),
+        "field_area_ha_quantiles": g.area_ha.quantile([0.05, 0.25, 0.5, 0.75, 0.95]).round(1).to_dict(),
+    })
+    (out / "delineation_stats.json").write_text(json.dumps(st, indent=2))
+    print(json.dumps(st, indent=2))
+    return g
+
+
 if __name__ == "__main__":
     import sys
+    v = (sys.argv[1:2] or ["v1.0"])[0]
     if sys.argv[1:2] == ["--add-part-attributes"]:
         add_part_attributes(sys.argv[2:])
+    elif v in config.SELECTION:
+        select(v)
     else:
-        build(version=(sys.argv[1:2] or ["v1.0"])[0])
+        build(version=v)

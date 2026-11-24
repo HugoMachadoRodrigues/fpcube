@@ -57,6 +57,118 @@ def worldcover(fields):
     return t.div(t.sum(1), axis=0).reset_index()
 
 
+SIZE_BINS = [2, 5, 20, 100, np.inf]
+SIZE_LABELS = ["2--5 ha", "5--20 ha", "20--100 ha", "$\\geq$100 ha"]
+
+
+def fluccs_agreement(fields):
+    """Fields against the official land use of the five water management districts (FLUCCS level 3, photo-
+    interpreted from 2020-2023 aerial imagery; fpcube.sources.fluccs), on the 30 m field grid (pixel centres).
+
+    Commission side: share of the field area in each reference class (pasture = FLUCCS 2100/2110/2120/2130), by
+    tier, region, field size and district. Omission side: share of the reference pasture that lies inside fields, and
+    where the rest went in the delineation (never or rarely CDL pasture, woody screen, outside parcels or parts
+    < 2 ha). Returns (per-field table, stats, text)."""
+    from fpcube.sources import fluccs
+    R = config.RAW / "fluccs"
+    names = list(fluccs.CLASSES)
+    K = len(names)
+    with rasterio.open(config.FIELDS_DIR / "field_labels.tif") as s_:
+        lab = s_.read(1)
+    with rasterio.open(R / "fluccs_l3.tif") as s_:
+        code = s_.read(1)
+    with rasterio.open(R / "fluccs_source.tif") as s_:
+        src = s_.read(1)
+    cls = fluccs.classify(code)
+    cls[cls < 0] = K                                        # no reference or unlisted code
+    del code
+    nf = int(lab.max()) + 1
+    inf = lab > 0
+    cnt = np.bincount(lab[inf].astype(np.int64) * (K + 1) + cls[inf], minlength=nf * (K + 1)).reshape(nf, K + 1)
+    scnt = np.bincount(lab[inf].astype(np.int64) * 6 + src[inf], minlength=nf * 6).reshape(nf, 6)
+    pf = pd.DataFrame(cnt, columns=names + ["no_reference"])
+    pf["fid"] = np.arange(nf)
+    inv = {v: k for k, v in fluccs.SOURCES.items()}
+    pf["district"] = [inv.get(int(i)) for i in scnt[:, 1:].argmax(1) + 1]
+    pf.loc[scnt[:, 1:].sum(1) == 0, "district"] = None
+    pf = pf[pf.fid.isin(fields.fid)]
+    px = pf[names + ["no_reference"]].sum(1)
+    m = pf.merge(fields[["fid", "tier", "county", "area_ha"]], on="fid")
+    m["region"] = m.county.map(config.REGION)
+    m["size"] = pd.cut(m.area_ha, SIZE_BINS, right=False, labels=SIZE_LABELS)
+
+    def shares(g):
+        ref = g[names].sum()
+        return (ref / ref.sum()).to_dict() | {"no_reference": float(g.no_reference.sum() / g[names + ["no_reference"]].sum().sum()),
+                                              "n_fields": int(len(g))}
+
+    st = {"all": shares(m)}
+    for col in ("tier", "region", "size", "district"):
+        st[col] = {str(k): shares(g) for k, g in m.groupby(col, observed=True)}
+    frac_p = m.pasture / m[names].sum(1).replace(0, np.nan)
+    st["fields_majority_pasture"] = float((frac_p >= 0.5).sum() / frac_p.notna().sum())
+    st["fields_majority_pasture_A"] = float(((frac_p >= 0.5) & (m.tier == "A")).sum() / (frac_p.notna() & (m.tier == "A")).sum())
+    st["fields_majority_pasture_B"] = float(((frac_p >= 0.5) & (m.tier == "B")).sum() / (frac_p.notna() & (m.tier == "B")).sum())
+
+    # omission: where the reference pasture lies relative to the delineation
+    with rasterio.open(config.FIELDS_DIR / "pasture_frequency.tif") as s_:
+        freq = s_.read(1)
+    with rasterio.open(config.FIELDS_DIR / "persistent_pasture.tif") as s_:
+        pers = s_.read(1)
+    need = int(np.ceil(config.PASTURE_MIN_FRACTION * len(config.PASTURE_YEARS)))
+    base = config.SELECTION.get(config.FIELDS_VERSION)
+    if base:                                                  # fields delineated but left out by the selection
+        with rasterio.open(config.vdir("fields", base) / "field_labels.tif") as s_:
+            dropped = (s_.read(1) > 0) & ~inf
+    else:
+        dropped = np.zeros(inf.shape, bool)
+    P = cls == 0
+    sep = np.isin(src, [fluccs.SOURCES[k] for k in ("NWFWMD", "SRWMD", "SJRWMD", "SFWMD")])
+    px_ha = 0.09
+
+    def omission(mask):
+        tot = mask.sum()
+        parts = {"in_fields": mask & inf,
+                 "cdl_never": mask & ~inf & (freq == 0),
+                 "cdl_lt_persistence": mask & ~inf & (freq >= 1) & (freq < need),
+                 "woody_screen": mask & ~inf & (freq >= need) & (pers == 2),
+                 "outside_parcels_or_small_parts": mask & ~inf & ~dropped & (freq >= need) & (pers == 1),
+                 "removed_by_selection": mask & dropped}
+        o = {k: float(v.sum() / tot) for k, v in parts.items()}
+        o["reference_pasture_kha"] = float(tot * px_ha / 1000)
+        return o
+
+    st["omission"] = omission(P)
+    st["omission_separate_pasture_classes"] = omission(P & sep)
+    st["omission_by_district"] = {k: omission(P & (src == v)) for k, v in fluccs.SOURCES.items()}
+    st["fields_kha"] = float(inf.sum() * px_ha / 1000)
+    st["fields_in_reference_pasture_kha"] = float((inf & P).sum() * px_ha / 1000)
+    a, A, B = st["all"], st["tier"]["A"], st["tier"]["B"]
+    o = st["omission"]
+    txt = ("The official land-use maps of Florida's five water management districts, photo-interpreted from aerial "
+           "imagery of 2019--2023 in the FLUCCS classification \\citep{{fdot1999,fgdl_fluccs}}, are an independent "
+           "reference for both the fields and the pasture they miss. Pasture in them (FLUCCS 2110--2130, and 2100 "
+           "cropland and pastureland in the Southwest Florida district, which does not separate the two) covers "
+           "{pA:.0f}\\,\\% of the area of tier~A fields and {pB:.0f}\\,\\% of tier~B fields ({pAll:.0f}\\,\\% "
+           "together); a further {cr:.0f}\\,\\% is mapped as crops (field crops, which include hay, row crops, groves "
+           "and nurseries), {sf:.0f}\\,\\% as horse farms, dairies or feeding operations, "
+           "{rg:.0f}\\,\\% as rangeland or rural open land, {we:.0f}\\,\\% as wetland (mostly wet prairie and "
+           "marsh), {mi:.0f}\\,\\% as mined or reclaimed land, {rr:.0f}\\,\\% as low-density or rural residential "
+           "land, {ur:.0f}\\,\\% as other urban or transportation land and {fo:.0f}\\,\\% as forest. "
+           "{maj:.0f}\\,\\% of fields are mostly pasture in the reference. Of the {ref} thousand hectares of "
+           "reference pasture, {inf_:.0f}\\,\\% lies inside fields; {never:.0f}\\,\\% was never mapped as pasture "
+           "by the CDL, {rare:.0f}\\,\\% in fewer than {need} of the ten years, {wood:.0f}\\,\\% was removed by the "
+           "woody screen, {par:.0f}\\,\\% lies outside parcels or in parts smaller than 2\\,ha{sel}.").format(
+        pA=100 * A["pasture"], pB=100 * B["pasture"], pAll=100 * a["pasture"], cr=100 * a["crops"], sf=100 * a["specialty_farms"],
+        rg=100 * (a["rangeland"] + a["rural_open"]), fo=100 * a["forest"], we=100 * a["wetland"],
+        ur=100 * a["urban"], mi=100 * a["mining_reclaimed"], rr=100 * a["rural_residential"], maj=100 * st["fields_majority_pasture"], ref=fmt_int(int(round(o["reference_pasture_kha"]))),
+        inf_=100 * o["in_fields"], never=100 * o["cdl_never"], rare=100 * o["cdl_lt_persistence"], need=need,
+        wood=100 * o["woody_screen"], par=100 * o["outside_parcels_or_small_parts"],
+        sel=(" and {:.0f}\\,\\% in fields left out by the selection".format(100 * o["removed_by_selection"])
+             if base else ""))
+    return pf, st, txt
+
+
 def delineation_text(wc, fields):
     m = wc.merge(fields[["fid", "tier", "area_ha"]], on="fid")
     out = {}
@@ -347,9 +459,16 @@ def freeze_and_condition(cube, fields, B=1000):
                                            out[f"freeze_{v}_{c}_q75"], out[f"freeze_{v}_{c}_lo"],
                                            out[f"freeze_{v}_{c}_hi"],
                                            f"{out[f'freeze_{v}_n_{c}']:,}".replace(",", "\\,"), p=p_)
-    txt = ("In the 5-day period starting {per}, {nc} fields had a mean minimum temperature of 2\\,$^\\circ$C or "
-           "lower and {nm} fields one of 8\\,$^\\circ$C or higher. Over the following 15 days observed NDVI changed by "
-           "{dc} in the cold fields and by {dm} in the mild ones, and VV by {vc} and {vm}\\,dB. In the same cold "
+    if "freeze_dndvi_mild_median" in out:
+        first = ("In the 5-day period starting {per}, {nc} fields had a mean minimum temperature of 2\\,$^\\circ$C or "
+                 "lower and {nm} fields one of 8\\,$^\\circ$C or higher. Over the following 15 days observed NDVI "
+                 "changed by {dc} in the cold fields and by {dm} in the mild ones, and VV by {vc} and {vm}\\,dB. ")
+    else:                                     # too few mild fields for a cold-mild comparison
+        first = ("In the 5-day period starting {per}, {nc} fields had a mean minimum temperature of 2\\,$^\\circ$C or "
+                 "lower and only {nm} one of 8\\,$^\\circ$C or higher, too few for a comparison of cold and mild "
+                 "fields. Over the following 15 days observed NDVI changed by {dc} in the cold fields, and VV by "
+                 "{vc}\\,dB. ")
+    txt = (first + "In the same cold "
            "fields and calendar periods of the other years without a freeze, NDVI changed by a median of {us:.2f}, so "
            "the 2018 change minus the usual one was {ex:.2f} (IQR {eq1:.2f} to {eq3:.2f}; 95\\,\\% interval of the "
            "median {elo:.2f} to {ehi:.2f}; $n={en}$; {eb:.0f}\\,\\% of fields below their usual change). "
@@ -358,8 +477,9 @@ def freeze_and_condition(cube, fields, B=1000):
            "($r={ra:.2f}$; Spearman {rs:.2f}); weeks are serially correlated and the yearly values range from "
            "{ymin:.2f} to {ymax:.2f}.").format(
         per=out["freeze_period"], nc=f"{out['freeze_n_cold']:,}".replace(",", "\\,"),
-        nm=f"{out['freeze_n_mild']:,}".replace(",", "\\,"), dc=g("dndvi", "cold", 2), dm=g("dndvi", "mild", 2),
-        vc=g("dvv", "cold", 1), vm=g("dvv", "mild", 1), us=out["freeze_usual_median"], ex=out["freeze_excess_median"],
+        nm=f"{out['freeze_n_mild']:,}".replace(",", "\\,"), dc=g("dndvi", "cold", 2),
+        dm=g("dndvi", "mild", 2) if "freeze_dndvi_mild_median" in out else "",
+        vc=g("dvv", "cold", 1), vm=g("dvv", "mild", 1) if "freeze_dvv_mild_median" in out else "", us=out["freeze_usual_median"], ex=out["freeze_excess_median"],
         eq1=out["freeze_excess_q25"], eq3=out["freeze_excess_q75"], elo=out["freeze_excess_lo"],
         ehi=out["freeze_excess_hi"], en=f"{out['freeze_excess_n']:,}".replace(",", "\\,"),
         eb=100 * out["freeze_excess_share_below"], nw=out["nass_weeks"], rr=out["nass_r_raw"],
@@ -533,6 +653,16 @@ def delineation_accounting(fields):
         {"step": f"Removed: parts smaller than 2 ha after the split {split}",
          "area_ha": -(st["kept_in_grazing_parcels_ha"] - st["in_fields_ha"])},
         {"step": "Fields", "area_ha": st["in_fields_ha"], "n": st["n_fields"]}]}
+    sel = st.get("selection")
+    if sel:                                                   # a field selection (config.SELECTION)
+        out["steps"][-1] = {"step": "Fields delineated", "area_ha": st["in_fields_ha"]}
+        out["steps"] += [
+            {"step": "Removed: fields with land-use change (pasture in < 50 % of the field in 2023-2025)",
+             "area_ha": -sel["removed_landuse_change_ha"], "n": -sel["removed_landuse_change_n"]},
+            {"step": f"Removed: tier B fields with pasture in < {sel['tier_b_min_pasture_years']:g} of 10 years "
+                     "(field mean)", "area_ha": -sel["removed_tier_b_persistence_ha"],
+             "n": -sel["removed_tier_b_persistence_n"]},
+            {"step": "Fields", "area_ha": st["selected_ha"], "n": st["n_fields"]}]
     if lab_p.exists():
         with rasterio.open(lab_p) as s_:
             lab = s_.read(1)
@@ -631,6 +761,10 @@ def main(version="v1.0"):
     wc = pd.read_csv(wc_p) if wc_p.exists() else worldcover(fields)
     wc.to_csv(wc_p, index=False)
     dstats, dtxt = delineation_text(wc, fields)
+    rstats, rtxt = None, None
+    if (config.RAW / "fluccs" / "fluccs_l3.tif").exists():
+        rf, rstats, rtxt = fluccs_agreement(fields)
+        rf.to_csv(vdir / "fluccs_by_field.csv", index=False)
     cstats, ctxt, py, ry, counts = coverage(rel, cube, fields)
     pd.DataFrame({"usable_optical_days_median_field": py, "radar_days_median_field": ry}).to_csv(
         vdir / "coverage_by_year.csv")
@@ -645,9 +779,9 @@ def main(version="v1.0"):
     estats = evidence(rel, fields)
     gc_all = 100 * (dstats["all"]["grassland"] + dstats["all"]["cropland"])
     summary = {"code": provenance.info(),
-               "stats": {"delineation": dstats, "coverage": cstats, "physical": pstats, "events": fstats, "ian_passes": istats, "quality": qstats,
+               "stats": {"reference_landuse": rstats, "delineation": dstats, "coverage": cstats, "physical": pstats, "events": fstats, "ian_passes": istats, "quality": qstats,
                          "accounting": acct, "evidence": estats},
-               "ValidationFields": dtxt, "ValidationCoverage": ctxt, "ValidationPhysical": ptxt, "ValidationEvents": ftxt, "ValidationIanPasses": itxt,
+               "ValidationReference": rtxt, "ValidationFields": dtxt, "ValidationCoverage": ctxt, "ValidationPhysical": ptxt, "ValidationEvents": ftxt, "ValidationIanPasses": itxt,
                "ValidationQuality": qtxt,
                "ValidationSummary": ("that {g:.0f}\\,\\% of the field area (tier~A {gA:.0f}\\,\\%, tier~B {gB:.0f}\\,\\%) "
                                      "is grassland or cropland in the independent ESA WorldCover map and that the median "

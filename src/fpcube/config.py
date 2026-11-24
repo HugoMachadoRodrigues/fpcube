@@ -20,6 +20,20 @@ def vdir(name, version=None):
     return INTERIM / name if v == "v1.0" else INTERIM / f"{name}_{v}"
 
 
+# Field selections: a version that keeps a subset of another version's fields (no new delineation, no new
+# extraction). v1.2 keeps the v1.1 fields without land-use change and, in tier B, only those whose pixels were CDL
+# pasture in at least TIER_B_MIN_PASTURE_YEARS of the ten years on average (the official FLUCCS land use showed
+# tier B fields below that to be mostly crops, residential or reclaimed land).
+SELECTION = {"v1.2": "v1.1"}
+TIER_B_MIN_PASTURE_YEARS = 9.5
+
+
+def obs_version(version=None):
+    """Field version whose interim observation and static tables a version reads (a selection reads its base's)."""
+    v = version or FIELDS_VERSION
+    return SELECTION.get(v, v)
+
+
 FIELDS_DIR = vdir("fields")
 
 

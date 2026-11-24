@@ -56,6 +56,13 @@ fpcube optical && fpcube radar                       # days; resumable
 fpcube cube && fpcube benchmark && fpcube release
 ```
 
+Field versions: v1.0 is the build above. `FPCUBE_FIELDS=v1.1 python -m fpcube.fields v1.1` re-delineates (connected
+parts, woody wetland screened) with ids kept stable against v1.0, and only new or reshaped fields are extracted again.
+`FPCUBE_FIELDS=v1.2 python -m fpcube.fields v1.2` is a selection of the v1.1 fields (no land-use change; tier B only
+with pasture in at least 9.5 of the ten CDL years), which reuses the v1.1 observations; then run `fpcube cube`,
+`python -m fpcube.validation v1.2`, the benchmark with `--release v1.2` and `python -m fpcube.release v1.2`
+with the same `FPCUBE_FIELDS`.
+
 Data go to `$FPCUBE_DATA` (default `data/` in this folder). HLS before 2020 is read from NASA LP DAAC and needs an Earthdata
 login in `~/.netrc`; everything else is public (Microsoft Planetary Computer, PRISM, CropScape, FDACS, USDM, NHC).
 
@@ -80,8 +87,10 @@ resampling events in Task 2.
 
 - `python -m fpcube.validation v1.0`: validation tables and text, including the area accounting of the delineation
   and quality by tier and field size.
-- `python scripts/validation_sample.py`: stratified points inside and outside the fields
-  (`validation/photo_sample.csv`, `.kml`) to label against high-resolution imagery.
+- `python -m fpcube.sources.fluccs`: downloads the official FLUCCS land use of the five water management districts
+  (FGDL statewide compilation) and rasterizes it on the field grid; `fpcube.validation` then compares the fields with
+  it (`validation/fluccs_by_field.csv`, pasture share by tier, region, size and district, and where the reference
+  pasture missing from the fields went).
 - `python scripts/audit/index_audit.py 50`: re-reads a sample of HLS scenes to count undefined and out-of-range
   per-pixel indices (`data/audit/index_audit.json`).
 - `python -m fpcube.sources.scene_shift` estimates the shift of granules whose field window was too small (scene level), and `python -m fpcube.cube --apply-scene-shift v1.0` brings it into the release (re-screened tables, recomposited fields).
