@@ -62,6 +62,12 @@ parts, woody wetland screened) with ids kept stable against v1.0, and only new o
 with pasture in at least 9.5 of the ten CDL years), which reuses the v1.1 observations; then run `fpcube cube`,
 `python -m fpcube.validation v1.2`, the benchmark with `--release v1.2` and `python -m fpcube.release v1.2`
 with the same `FPCUBE_FIELDS`.
+`FPCUBE_FIELDS=v1.3 python -m fpcube.fields v1.3` keeps every v1.2 field and adds tier C: official FLUCCS pasture
+that the CDL maps as woody or wetland (or that the woody screen removed), open in ESA WorldCover 2021, delineated by
+the same parcel and 2 ha rules (needs `python -m fpcube.sources.fluccs` and `python -m fpcube.sources.worldcover`
+first). Only tier C is extracted (`fpcube static`, `fpcube radar`, `fpcube optical` with `FPCUBE_FIELDS=v1.3`);
+`lineage.parquet` records, per field, the version whose observations it uses. FLUCCS and WorldCover selected tier C,
+so the validation reports their agreement for tiers A and B only.
 
 Data go to `$FPCUBE_DATA` (default `data/` in this folder). HLS before 2020 is read from NASA LP DAAC and needs an Earthdata
 login in `~/.netrc`; everything else is public (Microsoft Planetary Computer, PRISM, CropScape, FDACS, USDM, NHC).
@@ -87,6 +93,7 @@ resampling events in Task 2.
 
 - `python -m fpcube.validation v1.0`: validation tables and text, including the area accounting of the delineation
   and quality by tier and field size.
+- `python -m fpcube.sources.worldcover`: ESA WorldCover 2021 open and tree shares on the 30 m field grid (v1.3).
 - `python -m fpcube.sources.fluccs`: downloads the official FLUCCS land use of the five water management districts
   (FGDL statewide compilation) and rasterizes it on the field grid; `fpcube.validation` then compares the fields with
   it (`validation/fluccs_by_field.csv`, pasture share by tier, region, size and district, and where the reference

@@ -107,7 +107,7 @@ Following Gebru et al. (2021), *Datasheets for datasets*.
 - **Creators.** Watershed Hydrology Lab, UF/IFAS Range Cattle Research and Education Center, Ona, Florida.
 
 ## Composition
-- **Instances.** {n_fields} persistent pasture fields (tier A: {n_a}; tier B: {n_b}), {n_periods} five-day
+- **Instances.** {n_fields} persistent pasture fields (tier A: {n_a}; tier B: {n_b}{n_c}), {n_periods} five-day
   periods ({start} to {end}). The fields are a retrospective cohort: pasture persistent in the CDL of 2016-2025
   inside 2025 parcels, at least 2 ha. They do not cover every pasture in Florida (see the area accounting in
   `validation/delineation_accounting.csv`).
@@ -134,7 +134,10 @@ Following Gebru et al. (2021), *Datasheets for datasets*.
   forecast date (the benchmark removes them, `fpcube.benchmark.tasks.observed_only`).
   NASS pasture condition is absent for weeks NASS did not publish (shutdowns of Dec 2018-Jan 2019 and
   Oct-Nov 2025; Dec 2025-Mar 2026). Landfalls of 2026 storms are derived from working best tracks (preliminary).
-- **Sensitive data.** None. Parcel owner names were never downloaded.
+- **Sensitive data.** No personal data. Fields lie mostly on private land; their boundaries derive from the public
+  Florida Department of Revenue parcel roll, of which only the land-use code and the agricultural-exemption flag are
+  kept. Owner names and addresses were never downloaded, and parcel identifiers are not distributed. As with any
+  parcel-based map, a field can be matched to its public parcel record by location.
 
 ## Collection and preprocessing
 See the paper, Sections 2-4. All sources are public; the processing code (`fpcube`) rebuilds the release.
@@ -220,7 +223,7 @@ def copy_lineage(rel):
 FIELD_COLUMNS = {
     "field_id": ("", "field identifier FPCnnnnnn; joins the cube's field coordinate", "none"),
     "fid": ("", "integer field id; joins the observation tables", "none"),
-    "tier": ("", "A: parcel coded as grazing land (FDOR use codes 060-065); B: other parcel codes", "none"),
+    "tier": ("", "A: parcel coded as grazing land (FDOR use codes 060-065); B: other parcel codes; C (from v1.3): official FLUCCS pasture that the CDL maps as woody or wetland, open in ESA WorldCover 2021 (`flag_landuse_change` does not apply)", "none"),
     "county, county_fips": ("", "county holding the largest share of the field area (US Census 2023)", "none"),
     "dor_use_code, ag_exempt": ("", "FDOR parcel use code and agricultural exemption flag of the parcel", "may be empty"),
     "area_ha, perimeter_m, compactness": ("ha, m, 1", "area from 30 m pixels; perimeter and 4 pi A / P^2 of the polygon", "none"),
@@ -280,7 +283,8 @@ def datasheet(rel):
     n_multi = int((f.n_parts > 1).sum())
     txt = DATASHEET.format(version=rel.name, prism_date=prism_retrieved(rel), n_fields=len(f),
                            n_a=int((f.tier == "A").sum()),
-                           n_b=int((f.tier == "B").sum()), n_periods=len(t), start=t[0].date(),
+                           n_b=int((f.tier == "B").sum()),
+                           n_c=f"; tier C: {int((f.tier == 'C').sum())}" if (f.tier == "C").any() else "", n_periods=len(t), start=t[0].date(),
                            end=(t[-1] + pd.Timedelta(days=config.COMPOSITE_DAYS - 1)).date(),
                            geom_na=f"{100 * gna:.1f} %" if gna is not None else "some",
                            multipart=MULTIPART.format(n=n_multi) if n_multi else
@@ -291,6 +295,23 @@ def datasheet(rel):
                                "code_modified_since_commit") else ""),
                            code_hash=code.get("code_sha256_16", "?"), dictionary=dictionary(rel))
     (rel / "DATASHEET.md").write_text(txt)
+
+
+# parcel and owner attributes that must never reach a release (owner names are never downloaded)
+FORBIDDEN = ("parcel_id", "pidx", "objectid", "owner", "own_name", "own_addr", "phy_addr", "site_addr", "address")
+
+
+def check_no_parcel_ids(rel):
+    """Fail if a released table carries a parcel identifier or owner attribute."""
+    import pyarrow.parquet as pq
+    bad = []
+    for p in list(rel.rglob("*.parquet")) + list(rel.rglob("*.csv")):
+        if ".zarr" in p.parts[-2] or p.parent.name.endswith(".zarr"):
+            continue
+        cols = pq.read_schema(p).names if p.suffix == ".parquet" else pd.read_csv(p, nrows=0).columns
+        bad += [f"{p.relative_to(rel)}:{c}" for c in cols if any(k in c.lower() for k in FORBIDDEN)]
+    if bad:
+        raise SystemExit("parcel or owner attributes in the release: " + ", ".join(bad))
 
 
 def checksums(rel):
@@ -342,6 +363,7 @@ if __name__ == "__main__":
         print(deposit(rel))
     else:
         copy_lineage(rel)
+        check_no_parcel_ids(rel)
         datasheet(rel)
         print(build_catalog(rel))
         checksums(rel)

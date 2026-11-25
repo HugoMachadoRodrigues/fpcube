@@ -112,9 +112,22 @@ def unchanged_fids():
     return lin.loc[lin.status == "unchanged", "fid"].to_numpy()
 
 
+def obs_sources():
+    """{field version whose interim tables hold the records: fids read from it (None = all)}. v1.0 reads its own;
+    a later version reads its own records for new or reshaped fields and v1.0 for unchanged ones; a selection reads
+    its base's; a recovery records the source version of every field in lineage.obs_version."""
+    if config.FIELDS_VERSION == "v1.0":
+        return {"v1.0": None}
+    lin = pd.read_parquet(config.FIELDS_DIR / "lineage.parquet")
+    lin = lin[lin.status != "removed"]
+    if "obs_version" not in lin:
+        lin = lin.assign(obs_version=np.where(lin.status == "unchanged", "v1.0", config.obs_version()))
+    return {v: g.fid.to_numpy() for v, g in lin.groupby("obs_version")}
+
+
 def _load(kind, lo=None, hi=None, start=None, end=None):
     """Observations from the interim tables, optionally only fids in [lo, hi) and dates in [start, end). In a later
-    field version: the version's own records plus the v1.0 records of its unchanged fields."""
+    field version the records of each field come from the version that extracted them (obs_sources)."""
     import pyarrow.dataset as ds
     flt = None
     for cond in ((ds.field("fid") >= lo) if lo is not None else None,
@@ -123,17 +136,22 @@ def _load(kind, lo=None, hi=None, start=None, end=None):
                  (ds.field("date") < pd.Timestamp(end)) if end is not None else None):
         if cond is not None:
             flt = cond if flt is None else flt & cond
-    keep = unchanged_fids()
-    sets = [(_files(kind), flt)]
-    if keep is not None:
-        base_flt = ds.field("fid").isin(keep.tolist())
-        sets = [(_files(kind), flt), (_files(kind, "v1.0"), base_flt if flt is None else flt & base_flt)]
     parts = []
-    for files, f_ in sets:
-        if files:
-            t = ds.dataset([str(f) for f in files], format="parquet").to_table(filter=f_).to_pandas()
-            if len(t):
-                parts.append(t)
+    for v, fids in obs_sources().items():
+        files = _files(kind, v)
+        if not files:
+            continue
+        f_ = flt
+        if fids is not None:
+            if lo is not None or hi is not None:
+                fids = fids[(fids >= (lo if lo is not None else -1)) & (fids < (hi if hi is not None else np.inf))]
+                if not len(fids):
+                    continue
+            c = ds.field("fid").isin(fids.tolist())
+            f_ = c if f_ is None else f_ & c
+        t = ds.dataset([str(f) for f in files], format="parquet").to_table(filter=f_).to_pandas()
+        if len(t):
+            parts.append(t)
     if not parts:
         return pd.DataFrame()
     d = pd.concat(parts, ignore_index=True)
@@ -383,16 +401,15 @@ def weather_composites(fields, times):
 
 def static_table():
     f = gpd.read_parquet(config.FIELDS_DIR / "fields.parquet")
-    keep = unchanged_fids()
+    src = obs_sources()
     for rel_p in ("soil/soil_by_field.parquet", "terrain/terrain_by_field.parquet",
                   "wetlands/wetlands_by_field.parquet"):
         parts = []
-        p = config.vdir("static", config.obs_version()) / rel_p
-        if p.exists():
-            parts.append(pd.read_parquet(p))
-        if keep is not None and (config.vdir("static", "v1.0") / rel_p).exists():
-            b = pd.read_parquet(config.vdir("static", "v1.0") / rel_p)
-            parts.append(b[b.fid.isin(keep)])
+        for v, fids in src.items():
+            p = config.vdir("static", config.obs_version(v)) / rel_p
+            if p.exists():
+                b = pd.read_parquet(p)
+                parts.append(b if fids is None else b[b.fid.isin(fids)])
         if parts:
             f = f.merge(pd.concat(parts, ignore_index=True).drop_duplicates("fid"), on="fid", how="left")
     return f

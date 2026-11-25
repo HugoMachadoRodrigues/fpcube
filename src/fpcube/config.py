@@ -28,6 +28,15 @@ SELECTION = {"v1.2": "v1.1"}
 TIER_B_MIN_PASTURE_YEARS = 9.5
 
 
+# Field recoveries: a version that keeps every field of a base version and adds new fields (only these are extracted).
+# v1.3 adds tier C: official FLUCCS pasture that the CDL maps as woody or wetland, open in ESA WorldCover 2021.
+RECOVERY = {"v1.3": "v1.2"}
+RECOVER_FLUCCS = (2100, 2140)            # FLUCCS pasture codes [lo, hi)
+RECOVER_WOODY_WET_YEARS = 5              # CDL woody, woody wetland or herbaceous wetland in >= this many PASTURE_YEARS
+RECOVER_MIN_OPEN_PCT = 67                # WorldCover grassland + cropland share of the 30 m cell
+CDL_WETLAND_HERB = (195,)
+
+
 def obs_version(version=None):
     """Field version whose interim observation and static tables a version reads (a selection reads its base's)."""
     v = version or FIELDS_VERSION

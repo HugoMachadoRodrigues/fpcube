@@ -178,6 +178,51 @@ def stable_ids(lab, base_labels_path):
     return remap[lab], pd.concat([out, gone], ignore_index=True)
 
 
+def field_table(lab, nfield, pidx, parcels, freq, annual_pasture, transform, epsg, px_ha, years):
+    """Vector fields and their attributes from a label raster (ids 1..nfield, gaps allowed)."""
+    # vectorize
+    geoms, ids = [], []
+    for g, v in features.shapes(lab, mask=lab > 0, transform=transform, connectivity=4):
+        geoms.append(g)
+        ids.append(int(v))
+    from shapely.geometry import shape
+    gdf = gpd.GeoDataFrame({"fid": ids}, geometry=[shape(g) for g in geoms], crs=f"EPSG:{epsg}")
+    gdf = gdf.dissolve("fid").reset_index()
+    gdf = part_attributes(gdf)
+
+    # attributes from rasters
+    n_px = np.bincount(lab.ravel(), minlength=nfield + 1)
+    parcel_of = np.zeros(nfield + 1, np.int64)
+    parcel_of[lab[lab > 0]] = pidx[lab > 0]
+    freq_mean = np.bincount(lab.ravel(), weights=freq.ravel(), minlength=nfield + 1) / np.maximum(n_px, 1)
+    annual = {f"pasture_frac_{y}": np.bincount(lab.ravel(), weights=annual_pasture[y].ravel(),
+                                                minlength=nfield + 1) / np.maximum(n_px, 1) for y in years}
+    interior = ndimage.binary_erosion(lab > 0, structure=np.ones((3, 3)))
+    same = ndimage.minimum_filter(lab, size=3) == ndimage.maximum_filter(lab, size=3)
+    n_int = np.bincount(lab[interior & same], minlength=nfield + 1)
+
+    a = pd.DataFrame({"fid": np.arange(nfield + 1), "n_pixels": n_px, "n_interior_pixels": n_int,
+                      "pasture_years_mean": freq_mean, "pidx": parcel_of, **annual}).iloc[1:]
+    gdf = gdf.merge(a, on="fid").merge(parcels[["pidx", "CO_NO", "DOR_UC", "AgTaxExempt"]], on="pidx", how="left")
+    gdf["county"] = gdf.CO_NO.map(lambda c: COUNTIES.get(int(c)) if pd.notna(c) else None)
+    gdf["county_fips"] = gdf.county.map(FIPS)
+    gdf = assign_county(gdf)
+    gdf["area_ha"] = gdf.n_pixels * px_ha
+    gdf["perimeter_m"] = gdf.length
+    gdf["compactness"] = 4 * np.pi * gdf.area / gdf.length ** 2
+    cen = gdf.geometry.representative_point().to_crs(4326)
+    gdf["lon"], gdf["lat"] = cen.x.round(6), cen.y.round(6)
+    gdf["field_id"] = gdf.fid.map(lambda i: f"FPC{i:06d}")
+    gdf["tier"] = np.where(gdf.DOR_UC.isin(config.DOR_GRAZING), "A", "B")
+    gdf["flag_few_interior"] = gdf.n_interior_pixels < 5
+    gdf["flag_landuse_change"] = gdf[[f"pasture_frac_{y}" for y in years[-3:]]].mean(axis=1) < 0.5
+    gdf = gdf.rename(columns={"DOR_UC": "dor_use_code", "AgTaxExempt": "ag_exempt"}).drop(columns=["pidx", "CO_NO"])
+    cols = ["field_id", "fid", "tier", "county", "county_fips", "dor_use_code", "ag_exempt", "area_ha", "perimeter_m", "compactness",
+            "n_pixels", "n_interior_pixels", "pasture_years_mean", "lon", "lat", "n_parts", "largest_part_frac",
+            "flag_few_interior", "flag_landuse_change"] + list(annual) + ["geometry"]
+    return gdf[cols].sort_values("fid")
+
+
 def build(out_dir=None, version="v1.0"):
     """v1.0: fields as released in v1.0. v1.1: one connected part per field, woody wetland screened, ids kept
     stable against v1.0 (see the module docstring)."""
@@ -257,47 +302,7 @@ def build(out_dir=None, version="v1.0"):
     with rasterio.open(out / "field_labels.tif", "w", dtype="int32", nodata=0, **prof) as d:
         d.write(lab, 1)
 
-    # vectorize
-    geoms, ids = [], []
-    for g, v in features.shapes(lab, mask=lab > 0, transform=transform, connectivity=4):
-        geoms.append(g)
-        ids.append(int(v))
-    from shapely.geometry import shape
-    gdf = gpd.GeoDataFrame({"fid": ids}, geometry=[shape(g) for g in geoms], crs=f"EPSG:{epsg}")
-    gdf = gdf.dissolve("fid").reset_index()
-    gdf = part_attributes(gdf)
-
-    # attributes from rasters
-    n_px = np.bincount(lab.ravel(), minlength=nfield + 1)
-    parcel_of = np.zeros(nfield + 1, np.int64)
-    parcel_of[lab[lab > 0]] = pidx[lab > 0]
-    freq_mean = np.bincount(lab.ravel(), weights=freq.ravel(), minlength=nfield + 1) / np.maximum(n_px, 1)
-    annual = {f"pasture_frac_{y}": np.bincount(lab.ravel(), weights=annual_pasture[y].ravel(),
-                                                minlength=nfield + 1) / np.maximum(n_px, 1) for y in years}
-    interior = ndimage.binary_erosion(lab > 0, structure=np.ones((3, 3)))
-    same = ndimage.minimum_filter(lab, size=3) == ndimage.maximum_filter(lab, size=3)
-    n_int = np.bincount(lab[interior & same], minlength=nfield + 1)
-
-    a = pd.DataFrame({"fid": np.arange(nfield + 1), "n_pixels": n_px, "n_interior_pixels": n_int,
-                      "pasture_years_mean": freq_mean, "pidx": parcel_of, **annual}).iloc[1:]
-    gdf = gdf.merge(a, on="fid").merge(parcels[["pidx", "CO_NO", "DOR_UC", "AgTaxExempt"]], on="pidx", how="left")
-    gdf["county"] = gdf.CO_NO.map(lambda c: COUNTIES.get(int(c)) if pd.notna(c) else None)
-    gdf["county_fips"] = gdf.county.map(FIPS)
-    gdf = assign_county(gdf)
-    gdf["area_ha"] = gdf.n_pixels * px_ha
-    gdf["perimeter_m"] = gdf.length
-    gdf["compactness"] = 4 * np.pi * gdf.area / gdf.length ** 2
-    cen = gdf.geometry.representative_point().to_crs(4326)
-    gdf["lon"], gdf["lat"] = cen.x.round(6), cen.y.round(6)
-    gdf["field_id"] = gdf.fid.map(lambda i: f"FPC{i:06d}")
-    gdf["tier"] = np.where(gdf.DOR_UC.isin(config.DOR_GRAZING), "A", "B")
-    gdf["flag_few_interior"] = gdf.n_interior_pixels < 5
-    gdf["flag_landuse_change"] = gdf[[f"pasture_frac_{y}" for y in years[-3:]]].mean(axis=1) < 0.5
-    gdf = gdf.rename(columns={"DOR_UC": "dor_use_code", "AgTaxExempt": "ag_exempt"}).drop(columns=["pidx", "CO_NO"])
-    cols = ["field_id", "fid", "tier", "county", "county_fips", "dor_use_code", "ag_exempt", "area_ha", "perimeter_m", "compactness",
-            "n_pixels", "n_interior_pixels", "pasture_years_mean", "lon", "lat", "n_parts", "largest_part_frac",
-            "flag_few_interior", "flag_landuse_change"] + list(annual) + ["geometry"]
-    gdf = gdf[cols].sort_values("fid")
+    gdf = field_table(lab, nfield, pidx, parcels, freq, annual_pasture, transform, epsg, px_ha, years)
     gdf.to_parquet(out / "fields.parquet")
     if lineage is not None:
         lineage.to_parquet(out / "lineage.parquet", index=False)
@@ -383,6 +388,154 @@ def select(version="v1.2"):
     return g
 
 
+PARCEL_FILES = ("fl_grazing_parcels_2025.parquet", "fl_parcels_near_pasture_2025.parquet",
+                "fl_parcels_near_recovery_2025.parquet")
+
+
+def load_parcels(epsg, shape, transform, files=PARCEL_FILES):
+    """Parcels of the given files (existing ones), grazing-coded last so that they win where layers overlap, and
+    their index raster."""
+    pdir = config.RAW / "parcels"
+    parts = [gpd.read_parquet(pdir / f) for f in files if (pdir / f).exists()]
+    parcels = pd.concat(parts, ignore_index=True).drop_duplicates("OBJECTID")
+    parcels = gpd.GeoDataFrame(parcels, geometry="geometry", crs=parts[0].crs).to_crs(f"EPSG:{epsg}")
+    parcels = parcels[parcels.geometry.notna() & ~parcels.geometry.is_empty]
+    parcels["is_grazing"] = parcels.DOR_UC.isin(config.DOR_GRAZING)
+    parcels = parcels.sort_values(["is_grazing", "OBJECTID"]).reset_index(drop=True)
+    parcels["pidx"] = np.arange(1, len(parcels) + 1, dtype=np.int32)
+    pidx = features.rasterize(zip(parcels.geometry, parcels.pidx), out_shape=shape, transform=transform,
+                              fill=0, dtype="int32")
+    return parcels, pidx
+
+
+def recovery_mask(base):
+    """Pixels to recover (config.RECOVERY): official FLUCCS pasture that the CDL maps as woody or wetland in at least
+    RECOVER_WOODY_WET_YEARS of the PASTURE_YEARS or that the woody screen removed, open (grassland or cropland) in at
+    least RECOVER_MIN_OPEN_PCT of the 30 m cell in ESA WorldCover 2021, not developed or water in the latest CDL, and
+    outside every field the base version delineated (fields dropped by a selection stay dropped)."""
+    years = config.PASTURE_YEARS
+    rd = lambda p: rasterio.open(p).read(1)
+    lo, hi = config.RECOVER_FLUCCS
+    code = rd(config.RAW / "fluccs" / "fluccs_l3.tif")
+    m = (code >= lo) & (code < hi)
+    del code
+    ww = np.zeros(m.shape, np.uint8)
+    for y in years:
+        ww += np.isin(_read(y), config.CDL_WOODY + config.CDL_WETLAND_WOODY + config.CDL_WETLAND_HERB)
+    screened = rd(config.vdir("fields", base) / "persistent_pasture.tif") == 2
+    kind = np.where(screened, 2, np.where(ww >= config.RECOVER_WOODY_WET_YEARS, 1, 0)).astype(np.uint8)
+    m &= kind > 0
+    op = rd(config.RAW / "worldcover" / "worldcover_open_pct.tif")
+    m &= (op != 255) & (op >= config.RECOVER_MIN_OPEN_PCT)
+    m &= ~np.isin(_read(years[-1]), config.CDL_DEVELOPED + config.CDL_WATER)
+    m &= rd(config.vdir("fields", config.obs_version(base)) / "field_labels.tif") == 0
+    m &= rd(config.vdir("fields", base) / "field_labels.tif") == 0
+    return m, kind
+
+
+def recover(version="v1.3"):
+    """A field recovery (config.RECOVERY): every field of the base version plus tier C fields delineated in the
+    recovery mask (recovery_mask) by the same rule as the other fields (4-connected, inside one parcel, at least
+    MIN_FIELD_HA). Only the new fields are extracted; lineage.obs_version records where each field's records are."""
+    import shutil
+    from fpcube.sources import parcels as parcels_src
+    base = config.RECOVERY[version]
+    bdir, out = config.vdir("fields", base), config.vdir("fields", version)
+    out.mkdir(parents=True, exist_ok=True)
+    tmp = Path("/private/tmp/fpcube_recover")
+    tmp.mkdir(exist_ok=True)
+    years = config.PASTURE_YEARS
+    epsg, transform, width, height = _check_grids(years)
+    px_ha = abs(transform.a * transform.e) / 1e4
+    min_px = int(np.ceil(config.MIN_FIELD_HA / px_ha))
+
+    mask, kind = recovery_mask(base)
+    print("recovery mask ha", float(mask.sum() * px_ha), flush=True)
+    rp = config.RAW / "parcels" / "fl_parcels_near_recovery_2025.parquet"
+    if not rp.exists():
+        rule = ("all parcels (any use code) intersecting patches of at least "
+                f"{config.MIN_FIELD_HA} ha of the v1.3 recovery mask (fpcube.fields.recovery_mask; buffered 15 m)")
+        parcels_src.download_intersecting(mask, transform, f"EPSG:{epsg}", rp, rule)
+    parcels, pidx = load_parcels(epsg, (height, width), transform)
+    print("parcels rasterized", len(parcels), flush=True)
+
+    lab = connected_within_parcel(mask & (pidx > 0), pidx)
+    counts = np.bincount(lab.ravel())
+    small = counts < min_px
+    small[0] = True
+    lab[small[lab]] = 0
+    blin = pd.read_parquet(bdir / "lineage.parquet")
+    nxt = int(max(blin.fid.max(), blin.parent_fid.max())) + 1
+    kept = np.flatnonzero(~small)
+    remap = np.zeros(len(counts), np.int64)
+    remap[kept] = np.arange(nxt, nxt + len(kept))
+    lab = remap[lab]
+    print("new fields", len(kept), flush=True)
+
+    freq = rasterio.open(bdir / "pasture_frequency.tif").read(1)
+    annual = {}
+    for y in years:
+        annual[y] = np.isin(_read(y), config.CDL_PASTURE)
+    new = field_table(lab, int(lab.max()), pidx, parcels, freq, annual, transform, epsg, px_ha, years)
+    new["tier"] = "C"
+    new["flag_landuse_change"] = False     # CDL-based flag; tier C is by construction not CDL pasture
+    sub = rasterio.open(config.RAW / "fluccs" / "fluccs_l3.tif").read(1)
+    sel = lab > 0
+    t = pd.DataFrame({"fid": lab[sel], "fluccs": sub[sel], "kind": kind[sel]})
+    del sub
+
+    with rasterio.open(bdir / "field_labels.tif") as s_:
+        blab, prof = s_.read(1), s_.profile
+    blab[sel] = lab[sel]
+    with rasterio.open(tmp / "field_labels.tif", "w", **prof) as d:
+        d.write(blab, 1)
+    shutil.move(str(tmp / "field_labels.tif"), str(out / "field_labels.tif"))
+    for name in ("pasture_frequency.tif", "persistent_pasture.tif", "item_shifts_v1.0.parquet"):
+        if (bdir / name).exists():
+            shutil.copy2(bdir / name, out / name)
+    with rasterio.open(tmp / "recovered_kind.tif", "w", **{**prof, "dtype": "uint8", "nodata": 0}) as d:
+        d.write(np.where(sel, kind, 0).astype(np.uint8), 1)    # 1 CDL woody or wetland, 2 woody screen
+    shutil.move(str(tmp / "recovered_kind.tif"), str(out / "recovered_kind.tif"))
+
+    old = gpd.read_parquet(bdir / "fields.parquet")
+    allf = pd.concat([old, new[old.columns]], ignore_index=True).sort_values("fid")
+    allf = gpd.GeoDataFrame(allf, geometry="geometry", crs=old.crs)
+    allf.to_parquet(tmp / "fields.parquet")
+    shutil.move(str(tmp / "fields.parquet"), str(out / "fields.parquet"))
+    new.to_parquet(tmp / "fields_extract.parquet")
+    shutil.move(str(tmp / "fields_extract.parquet"), str(out / "fields_extract.parquet"))
+
+    if "obs_version" not in blin:
+        blin["obs_version"] = np.where(blin.status == "unchanged", "v1.0", config.obs_version(base))
+        blin.loc[blin.status == "removed", "obs_version"] = None
+    nl = pd.DataFrame({"fid": new.fid.to_numpy(), "parent_fid": 0, "status": "new",
+                       "n_pixels": new.n_pixels.to_numpy(), "obs_version": version})
+    pd.concat([blin, nl], ignore_index=True).to_parquet(out / "lineage.parquet", index=False)
+
+    st = json.loads((bdir / "delineation_stats.json").read_text())
+    names = {2100: "2100 cropland and pasture", 2110: "2110 improved", 2120: "2120 unimproved", 2130: "2130 woodland"}
+    st.update({
+        "version": version,
+        "recovery": {"base": base, "rule": recovery_mask.__doc__.split("Pixels to recover (config.RECOVERY): ")[1],
+                     "min_open_pct": config.RECOVER_MIN_OPEN_PCT, "woody_wet_years": config.RECOVER_WOODY_WET_YEARS,
+                     "mask_ha": float(mask.sum() * px_ha), "mask_in_parcels_ha": float((mask & (pidx > 0)).sum() * px_ha),
+                     "n_fields": int(len(new)), "area_ha": float(new.area_ha.sum()),
+                     "area_ha_by_fluccs": {names.get(int(k), str(k)): float(v * px_ha)
+                                           for k, v in t.fluccs.value_counts().items()},
+                     "area_ha_cdl_woody_wet": float((t.kind == 1).sum() * px_ha),
+                     "area_ha_woody_screen": float((t.kind == 2).sum() * px_ha),
+                     "tier_ab_parcel_share": float((new.dor_use_code.isin(config.DOR_GRAZING)).mean())},
+        "n_fields": int(len(allf)),
+        "n_fields_tier_C": int(len(new)),
+        "area_ha_tier_C": float(new.area_ha.sum()),
+        "field_area_ha_quantiles": allf.area_ha.quantile([0.05, 0.25, 0.5, 0.75, 0.95]).round(1).to_dict(),
+        "lineage": pd.concat([blin, nl]).status.value_counts().to_dict(),
+    })
+    (out / "delineation_stats.json").write_text(json.dumps(st, indent=2))
+    print(json.dumps(st["recovery"], indent=2))
+    return allf
+
+
 if __name__ == "__main__":
     import sys
     v = (sys.argv[1:2] or ["v1.0"])[0]
@@ -390,5 +543,7 @@ if __name__ == "__main__":
         add_part_attributes(sys.argv[2:])
     elif v in config.SELECTION:
         select(v)
+    elif v in config.RECOVERY:
+        recover(v)
     else:
         build(version=v)

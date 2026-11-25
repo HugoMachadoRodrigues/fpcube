@@ -74,7 +74,17 @@ def download_all_near_pasture(cell_m=10000, min_ha=5.0, out=None, page=2000):
     gmask = features.rasterize(((g, 1) for g in graz.geometry), out_shape=keep.shape, transform=tr, fill=0,
                                dtype="uint8").astype(bool)
     rest = keep & ~gmask
-    # patches of pasture outside grazing parcels that could hold a field (>= MIN_FIELD_HA)
+    rule = ("all parcels (any use code) intersecting persistent-pasture patches of at least "
+            f"{config.MIN_FIELD_HA} ha that lie outside grazing-coded parcels (patches buffered 15 m)")
+    return download_intersecting(rest, tr, crs, out, rule, cell_m=cell_m, page=page)
+
+
+def download_intersecting(rest, tr, crs, out, rule, cell_m=10000, page=2000):
+    """All parcels (any use code) intersecting the 4-connected patches of mask `rest` that reach MIN_FIELD_HA
+    (patches buffered 15 m, grouped by cell only to batch the spatial queries). Owner names are never requested."""
+    import numpy as np
+    from rasterio import features
+    from concurrent.futures import ThreadPoolExecutor
     from scipy import ndimage
     from shapely.geometry import shape
     lab, n = ndimage.label(rest, structure=[[0, 1, 0], [1, 1, 1], [0, 1, 0]])
@@ -130,8 +140,7 @@ def download_all_near_pasture(cell_m=10000, min_ha=5.0, out=None, page=2000):
     gdf = gpd.GeoDataFrame(pd.concat(frames, ignore_index=True), geometry="geometry", crs=config.CRS)
     gdf["geometry"] = gdf.geometry.make_valid()
     gdf.to_parquet(out)
-    meta = {"source": config.PARCEL_SERVICE, "rule": "all parcels (any use code) intersecting persistent-pasture patches of at least "
-            f"{config.MIN_FIELD_HA} ha that lie outside grazing-coded parcels (patches buffered 15 m)", "n": len(gdf), "n_cells": len(cells),
+    meta = {"source": config.PARCEL_SERVICE, "rule": rule, "n": len(gdf), "n_cells": len(cells),
             "fields": config.PARCEL_FIELDS, "downloaded": pd.Timestamp.now("UTC").isoformat()}
     out.with_suffix(".json").write_text(json.dumps(meta, indent=2))
     return out

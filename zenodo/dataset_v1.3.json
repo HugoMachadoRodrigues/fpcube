@@ -1,0 +1,36 @@
+{
+  "upload_type": "dataset",
+  "title": "Florida Pasture Cube v1.3: field-level time series of persistent pasture fields in Florida, 2016-2026",
+  "creators": [
+    {
+      "name": "Rodrigues, Hugo",
+      "affiliation": "University of Florida, Institute of Food and Agricultural Sciences, Range Cattle Research and Education Center, Ona, Florida, USA"
+    }
+  ],
+  "version": "1.3",
+  "language": "eng",
+  "access_right": "open",
+  "license": "cc-by-4.0",
+  "keywords": [
+    "pasture",
+    "grazing lands",
+    "Florida",
+    "data cube",
+    "Harmonized Landsat Sentinel-2",
+    "Sentinel-1",
+    "PRISM",
+    "drought",
+    "hurricanes",
+    "machine learning benchmark"
+  ],
+  "description": "<p>Field-level, 5-day time series for 62,847 persistent pasture fields in Florida (0.98 Mha), 1 January 2016 to 29 October 2026 (791 periods): HLS v2.0 optical reflectance and indices with observation counts and gap-filling flags, Sentinel-1 VV and VH backscatter, and PRISM weather. Tiers A and B are persistent CDL pasture inside 2025 parcels, at least 2 ha, without land-use change; fields on parcels not coded as grazing land (tier B) are kept only when their pixels were CDL pasture in at least 9.5 of the ten years on average. Tier C (10,798 fields, 0.10 Mha, new in v1.3) adds open pasture from the official FLUCCS land use of the five water management districts that the CDL maps as woody or wetland, open (grassland or cropland) on at least 67 % of the cell in ESA WorldCover 2021. Each field carries soil (gNATSGO), terrain (3DEP: slope, TWI, HAND) and wetland (C-CAP) attributes and quality flags; lineage.parquet links field ids to earlier versions. Validation tables compare the fields with the official FLUCCS land use of the five water management districts and with ESA WorldCover. Labels: US Drought Monitor (county-week), NASS pasture condition (state-week) and hurricane tracks and landfalls. Per-acquisition long tables keep the provenance of every composite. Three benchmark tasks with fixed splits and baseline results are included.</p><p>Files: each directory of the release is one zip (stored, not recompressed); unzip them in one folder to recover the release layout. cube.zarr.zip holds the Zarr store contents at its root (unzip cube.zarr.zip -d cube.zarr, or open it with zarr's ZipStore). DATASHEET.md documents composition, missing data and uses; SHA256SUMS lists checksums of every unpacked file and DEPOSIT_SHA256SUMS those of the uploaded files.</p>",
+  "notes": "Contains modified Copernicus Sentinel data (2016-2026). Source data and their attributions are listed in DATASHEET.md. Field boundaries derive from the public Florida Department of Revenue parcel roll; only the land-use code and the agricultural-exemption flag are kept, owner names and addresses were never downloaded and parcel identifiers are not distributed. PRISM values within about six months of the retrieval date are provisional; 2026 landfalls are derived from working best tracks.",
+  "related_identifiers": [
+    {
+      "identifier": "https://github.com/HugoMachadoRodrigues/fpcube",
+      "relation": "isCompiledBy",
+      "resource_type": "software",
+      "scheme": "url"
+    }
+  ]
+}

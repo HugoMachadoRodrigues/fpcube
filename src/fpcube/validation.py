@@ -102,8 +102,11 @@ def fluccs_agreement(fields):
         return (ref / ref.sum()).to_dict() | {"no_reference": float(g.no_reference.sum() / g[names + ["no_reference"]].sum().sum()),
                                               "n_fields": int(len(g))}
 
-    st = {"all": shares(m)}
-    for col in ("tier", "region", "size", "district"):
+    mC = m[m.tier == "C"]                                    # recovered with this reference: not a validation
+    st = {"tier": {str(k): shares(g) for k, g in m.groupby("tier", observed=True)}}
+    m = m[m.tier != "C"]
+    st["all"] = shares(m)
+    for col in ("region", "size", "district"):
         st[col] = {str(k): shares(g) for k, g in m.groupby(col, observed=True)}
     frac_p = m.pasture / m[names].sum(1).replace(0, np.nan)
     st["fields_majority_pasture"] = float((frac_p >= 0.5).sum() / frac_p.notna().sum())
@@ -117,6 +120,9 @@ def fluccs_agreement(fields):
         pers = s_.read(1)
     need = int(np.ceil(config.PASTURE_MIN_FRACTION * len(config.PASTURE_YEARS)))
     base = config.SELECTION.get(config.FIELDS_VERSION)
+    if config.FIELDS_VERSION in config.RECOVERY:
+        base = config.obs_version(config.RECOVERY[config.FIELDS_VERSION])
+    labC = np.isin(lab, fields.fid[fields.tier == "C"].to_numpy()) if len(mC) else np.zeros(lab.shape, bool)
     if base:                                                  # fields delineated but left out by the selection
         with rasterio.open(config.vdir("fields", base) / "field_labels.tif") as s_:
             dropped = (s_.read(1) > 0) & ~inf
@@ -128,7 +134,8 @@ def fluccs_agreement(fields):
 
     def omission(mask):
         tot = mask.sum()
-        parts = {"in_fields": mask & inf,
+        parts = {"in_fields": mask & inf & ~labC,
+                 "recovered_tier_c": mask & labC,
                  "cdl_never": mask & ~inf & (freq == 0),
                  "cdl_lt_persistence": mask & ~inf & (freq >= 1) & (freq < need),
                  "woody_screen": mask & ~inf & (freq >= need) & (pers == 2),
@@ -141,6 +148,9 @@ def fluccs_agreement(fields):
     st["omission"] = omission(P)
     st["omission_separate_pasture_classes"] = omission(P & sep)
     st["omission_by_district"] = {k: omission(P & (src == v)) for k, v in fluccs.SOURCES.items()}
+    if not len(mC):
+        for o_ in [st["omission"], st["omission_separate_pasture_classes"], *st["omission_by_district"].values()]:
+            o_.pop("recovered_tier_c")
     st["fields_kha"] = float(inf.sum() * px_ha / 1000)
     st["fields_in_reference_pasture_kha"] = float((inf & P).sum() * px_ha / 1000)
     a, A, B = st["all"], st["tier"]["A"], st["tier"]["B"]
@@ -166,6 +176,13 @@ def fluccs_agreement(fields):
         wood=100 * o["woody_screen"], par=100 * o["outside_parcels_or_small_parts"],
         sel=(" and {:.0f}\\,\\% in fields left out by the selection".format(100 * o["removed_by_selection"])
              if base else ""))
+    if len(mC):
+        C = st["tier"]["C"]
+        txt = txt.replace("{:.0f}\\,\\% lies inside fields;".format(100 * o["in_fields"]),
+                          "{:.0f}\\,\\% lies inside tier~A and B fields and {:.0f}\\,\\% inside tier~C fields;".format(
+                              100 * o["in_fields"], 100 * o["recovered_tier_c"]))
+        txt += (" The shares above exclude tier~C, whose fields were taken from this reference and are therefore "
+                "{:.0f}\\,\\% pasture in it by construction.").format(100 * C["pasture"])
     return pf, st, txt
 
 
@@ -177,6 +194,12 @@ def delineation_text(wc, fields):
         w = g.area_ha / g.area_ha.sum()
         out[tier] = {c: float((g[c] * w).sum()) for c in ("grassland", "tree", "cropland", "built",
                                                           "herbaceous_wetland", "water") if c in g}
+    if (m.tier == "C").any():                               # tier C was selected with WorldCover: not a validation
+        g = m[m.tier == "C"]
+        w = g.area_ha / g.area_ha.sum()
+        out["C"] = {c: float((g[c] * w).sum()) for c in ("grassland", "tree", "cropland", "built",
+                                                          "herbaceous_wetland", "water") if c in g}
+    m = m[m.tier != "C"]
     w = m.area_ha / m.area_ha.sum()
     out["all"] = {c: float((m[c] * w).sum()) for c in ("grassland", "cropland", "tree") if c in m}
     txt = ("ESA WorldCover 2021 \\citep{{zanaga2022}}, which is derived from Sentinel-1 and Sentinel-2 independently of "
@@ -191,6 +214,10 @@ def delineation_text(wc, fields):
         cB=100 * out["B"]["cropland"], tA=100 * out["A"]["tree"], tB=100 * out["B"]["tree"],
         wA=100 * out["A"].get("herbaceous_wetland", 0), wB=100 * out["B"].get("herbaceous_wetland", 0),
         bmax=100 * max(out["A"]["built"], out["B"]["built"]))
+    if "C" in out:
+        txt += (" Tier~C fields were selected as open in WorldCover, which maps {gC:.0f}\\,\\% of their area as "
+                "grassland or cropland and {tC:.0f}\\,\\% as trees; this is by construction.").format(
+            gC=100 * (out["C"]["grassland"] + out["C"]["cropland"]), tC=100 * out["C"]["tree"])
     return out, txt
 
 
@@ -663,6 +690,18 @@ def delineation_accounting(fields):
                      "(field mean)", "area_ha": -sel["removed_tier_b_persistence_ha"],
              "n": -sel["removed_tier_b_persistence_n"]},
             {"step": "Fields", "area_ha": st["selected_ha"], "n": st["n_fields"]}]
+    rec = st.get("recovery")
+    if rec:                                                   # a field recovery (config.RECOVERY)
+        out["steps"][-1]["step"] = "Fields (tiers A and B)"
+        out["steps"][-1]["n"] = st["n_fields"] - rec["n_fields"]
+        out["steps"] += [
+            {"step": "Official FLUCCS pasture mapped by the CDL as woody or wetland (or woody-screened), open in "
+                     f"WorldCover (>= {rec['min_open_pct']} %), outside the fields", "area_ha": rec["mask_ha"]},
+            {"step": "Removed: outside any parcel", "area_ha": -(rec["mask_ha"] - rec["mask_in_parcels_ha"])},
+            {"step": "Removed: parts smaller than 2 ha after the split into connected parts",
+             "area_ha": -(rec["mask_in_parcels_ha"] - rec["area_ha"])},
+            {"step": "Added: tier C fields", "area_ha": rec["area_ha"], "n": rec["n_fields"]},
+            {"step": "Fields", "area_ha": st["selected_ha"] + rec["area_ha"], "n": st["n_fields"]}]
     if lab_p.exists():
         with rasterio.open(lab_p) as s_:
             lab = s_.read(1)

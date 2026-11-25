@@ -152,8 +152,10 @@ def fig1(rel):
     co.plot(ax=ax, color=LAND, edgecolor=CO_EDGE, linewidth=0.25)
     state.boundary.plot(ax=ax, color=MUTED, linewidth=0.5)
     tiers = {"A": (BLUE, "Tier A", "parcels coded as grazing land"),
-             "B": (ORANGE, "Tier B", "other parcel codes, mapped as pasture")}
-    for t in ("B", "A"):
+             "B": (ORANGE, "Tier B", "other parcel codes, mapped as pasture"),
+             "C": (AQUA, "Tier C", "official land-use pasture, open,\nmapped by the CDL as woody or wetland")}
+    TIERS = [t for t in ("A", "B", "C") if (f.tier == t).any()]
+    for t in TIERS[::-1]:
         g = f[f.tier == t]
         g.plot(ax=ax, color=tiers[t][0], edgecolor=tiers[t][0], linewidth=0.15, rasterized=True)
     map_axes(ax, state.total_bounds)
@@ -168,7 +170,7 @@ def fig1(rel):
     scalebar(ax, x0 + 0.06 * (x1 - x0), y0 + 0.05 * (y1 - y0), 100, h=7000)
     north(ax, x1 - 0.07 * (x1 - x0), y1 - 0.16 * (y1 - y0), 0.06 * (y1 - y0))
     handles = [Patch(color=tiers[t][0], label=f"{tiers[t][1]}: {tiers[t][2]}\n{num((f.tier == t).sum())} fields, "
-                     f"{num(f.area_ha[f.tier == t].sum() / 1000)} kha") for t in ("A", "B")]
+                     f"{num(f.area_ha[f.tier == t].sum() / 1000)} kha") for t in TIERS]
     leg = ax.legend(handles=handles, loc="lower left", bbox_to_anchor=(0.02, 0.12), fontsize=6, handlelength=1.1,
                     handleheight=1.1, labelspacing=0.9, borderaxespad=0)
     for t in leg.get_texts():
@@ -201,7 +203,7 @@ def fig1(rel):
     axc = fig.add_subplot(gs[1, 1])
     axc.set_facecolor(LAND)
     sub = f.cx[box[0]:box[2], box[1]:box[3]]
-    for t in ("B", "A"):
+    for t in TIERS[::-1]:
         sub[sub.tier == t].plot(ax=axc, color=tiers[t][0], edgecolor="white", linewidth=0.35, rasterized=True)
     axc.set_xlim(box[0], box[2]); axc.set_ylim(box[1], box[3]); axc.set_aspect("equal")
     axc.set_xticks([]); axc.set_yticks([]); axc.grid(False)
