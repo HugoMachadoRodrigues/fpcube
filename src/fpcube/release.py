@@ -57,9 +57,11 @@ def build_catalog(rel):
     groups = {"fields": ["fields.parquet"] + (["lineage.parquet"] if (rel / "lineage.parquet").exists() else []), "cube": ["cube.zarr"],
               "optical-observations": sorted(p.name for p in (rel / "optical_observations").glob("*.parquet")),
               "radar-observations": sorted(p.name for p in (rel / "radar_observations").glob("*.parquet")),
+              "composites": sorted(p.name for p in (rel / "composites").glob("*.parquet")),
               "labels": sorted(p.name for p in (rel / "labels").glob("*.parquet")),
               "benchmark": sorted(p.name for p in (rel / "benchmark").glob("*")) if (rel / "benchmark").exists() else []}
     sub = {"optical-observations": "optical_observations", "radar-observations": "radar_observations",
+           "composites": "composites",
            "labels": "labels", "benchmark": "benchmark"}
     for gid, names in groups.items():
         if not names:
@@ -114,7 +116,9 @@ Following Gebru et al. (2021), *Datasheets for datasets*.
 - **Per field:** geometry, county, parcel use code (no owner information), area and shape, CDL pasture fraction
   per year, quality flags, soil, terrain and wetland attributes.
 - **Per field and period:** HLS reflectance and indices (with observation counts and gap-filling flag),
-  Sentinel-1 VV/VH, PRISM weather.
+  Sentinel-1 VV/VH, PRISM weather. The same values are in `cube.zarr` (field x time) and in
+  `composites/composites_YYYY.parquet` (one row per field and period, one column per variable; `date` is the first
+  day of the period).
 - **Per field and acquisition:** long tables with clear-pixel counts, geometric shift, sensor, orbit; optical
   records carry quality flags (`qa_clear`, `qa_geometry`, `qa_range`, `qa_haze`) and `qa_use`, the records that
   enter the composites. `qa_geometry_status` is `pass`, `fail` or `not_assessed`: the shift is estimated over the
@@ -142,7 +146,7 @@ Following Gebru et al. (2021), *Datasheets for datasets*.
 ## Collection and preprocessing
 See the paper, Sections 2-4. All sources are public; the processing code (`fpcube`) rebuilds the release.
 Code that produced the validation and benchmark files of this release: commit {commit}, code hash {code_hash}
-(`fpcube.provenance`; the same hash means the same code). CDL 2024 and 2025 are the 30 m versions distributed
+(`fpcube.provenance`; the same hash means the same code).{public_code} CDL 2024 and 2025 are the 30 m versions distributed
 by CropScape (NASS also publishes 10 m versions from 2024).
 
 ## Reading the data
@@ -153,6 +157,15 @@ cube = xr.open_zarr("cube.zarr")                             # or zarr.storage.Z
 sel = fields[(fields.tier == "A") & ~fields.flag_few_interior & (fields.n_parts == 1)]
 ndvi = cube.ndvi.sel(field=sel.field_id.values)
 observed = ndvi.where(cube.n_optical_obs.sel(field=sel.field_id.values) > 0)   # drop interpolated values
+```
+
+In R, the `fpcubeR` package (https://github.com/HugoMachadoRodrigues/fpcubeR) downloads the files and reads the
+fields, composites, observations and labels:
+```r
+library(fpcubeR)
+fpc_download(c("fields", "composites"), years = 2022)
+f <- fpc_fields(tier = "A")
+x <- fpc_composites(fields = f$field_id[1:10], vars = c("ndvi", "vv_db", "ppt_sum"), years = 2022)
 ```
 
 ## Variable dictionary
@@ -180,7 +193,9 @@ observed = ndvi.where(cube.n_optical_obs.sel(field=sel.field_id.values) > 0)   #
 ## Distribution and licence
 CC BY 4.0. DOI in the README. STAC catalog: `stac/catalog.json`. Checksums of every file, including the Zarr
 store, in `SHA256SUMS`. On Zenodo each directory is one zip: unzip them in one folder to recover this layout
-(`unzip cube.zarr.zip -d cube.zarr`, or open `cube.zarr.zip` directly with zarr's `ZipStore`).
+(`unzip cube.zarr.zip -d cube.zarr`, or open `cube.zarr.zip` directly with zarr's `ZipStore`). The yearly
+composite files are uploaded as they are (`composites_YYYY.parquet`), so single years can be downloaded alone; put
+them in a folder `composites/` to recover this layout.
 
 ## Maintenance
 Annual updates planned (new season, new CDL and parcel vintages); versions are immutable and numbered.
@@ -254,7 +269,9 @@ FIELD_COLUMNS = {
 def dictionary(rel):
     import xarray as xr
     ds = xr.open_zarr(rel / "cube.zarr")
-    lines = ["### cube.zarr (dims field x time; NaN = missing)", "", "| variable | units | description |", "|---|---|---|"]
+    lines = ["### cube.zarr (dims field x time; NaN = missing) and composites/composites_YYYY.parquet", "",
+             "In the Parquet files the same variables are columns, with `field_id`, `fid` and `date` (first day of "
+             "the 5-day period).", "", "| variable | units | description |", "|---|---|---|"]
     for v in ds.data_vars:
         a = ds[v].attrs
         lines.append(f"| `{v}` | {a.get('units', '')} | {a.get('long_name', '')} |")
@@ -271,6 +288,12 @@ def dictionary(rel):
               "`vv_lin`, `vh_lin` (gamma0, linear, field mean over `n_px` pixels), `vv_db`, `vh_db`, `vh_vv_db`, "
               "`date`, `item`, `platform`, `orbit_state`, `relative_orbit`."]
     return "\n".join(lines)
+
+
+# where the code that produced a release is published (its development commit may not be public)
+PUBLIC_CODE = {"v1.3": " The same code (same hash) is commit db2b57d of the public repository\n"
+                       "https://github.com/HugoMachadoRodrigues/fpcube, released as fpcube 1.3.0\n"
+                       "(https://doi.org/10.5281/zenodo.24542304)."}
 
 
 def datasheet(rel):
@@ -293,7 +316,8 @@ def datasheet(rel):
                            n_wt_missing=int(f.water_table_min_cm.isna().sum()),
                            commit=code.get("commit", "?") + (" (with local changes)" if code.get(
                                "code_modified_since_commit") else ""),
-                           code_hash=code.get("code_sha256_16", "?"), dictionary=dictionary(rel))
+                           code_hash=code.get("code_sha256_16", "?"), dictionary=dictionary(rel),
+                           public_code=PUBLIC_CODE.get(rel.name, ""))
     (rel / "DATASHEET.md").write_text(txt)
 
 
@@ -332,6 +356,9 @@ def _zip(src, dest, prefix):
                 shutil.copyfileobj(f, out, 1 << 22)
 
 
+FLAT = ("composites",)                      # directories uploaded as plain files, not zipped
+
+
 def deposit(rel, out=None):
     """Flat folder for Zenodo: plain files as they are, each directory as a zip, and DEPOSIT_SHA256SUMS for the
     uploaded files. Built in a temporary folder and moved into place (new files written straight into a OneDrive
@@ -342,6 +369,9 @@ def deposit(rel, out=None):
     for p in sorted(rel.iterdir()):
         if p.is_file():
             shutil.copy2(p, tmp / p.name)
+        elif p.name in FLAT:
+            for q in sorted(p.glob("*")):
+                shutil.copy2(q, tmp / q.name)               # e.g. composites_2020.parquet, downloadable alone
         elif p.name.endswith(".zarr"):
             _zip(p, tmp / f"{p.name}.zip", "")              # store contents at the root -> ZipStore opens it
         else:

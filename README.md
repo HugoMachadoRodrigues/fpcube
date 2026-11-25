@@ -17,6 +17,11 @@ lands. It covers 62,847 persistent pasture fields (0.98 Mha) with a 5-day time s
 Per-acquisition long tables keep the quality information of every value, so every composite can be traced to the
 observations it came from.
 
+The 5-day composites are distributed twice: as a Zarr store (`cube.zarr`, field × time) and as one Parquet file
+per year (`composites/composites_YYYY.parquet`, one row per field and period, one column per variable). In R, use
+the companion package [fpcubeR](https://github.com/HugoMachadoRodrigues/fpcubeR). It downloads the data, reads
+fields, composites, observations and labels, and adds drought classes, anomalies and plots.
+
 | | |
 |---|---|
 | Data (v1.3) | Zenodo, DOI to be added on publication (CC BY 4.0) |
@@ -40,6 +45,29 @@ addresses are never downloaded, and parcel identifiers are not distributed.
 
 ## Reading the data
 
+### With `fpcube.read`
+
+`fpcube.read` reads a release folder, or the files downloaded from Zenodo laid out the same way, into pandas and
+geopandas. It has the same functions and defaults as the R package.
+
+```python
+from fpcube import read
+
+d = "data/release/v1.3"
+f = read.fields(d, tier="A", county="Hardee")                     # GeoDataFrame, EPSG:5070
+x = read.composites(d, fields=f, vars=["ndvi", "vv_db", "ppt_sum"], years=[2022])
+x = read.add_drought(d, x)                                       # county drought class of each period
+a = read.anomaly(read.composites(d, fields=f, vars=["ndvi"]), "ndvi", ref_years=range(2016, 2023))
+o = read.observations(d, "optical", fields=f, years=[2022])     # per-acquisition HLS records (qa_use)
+u = read.labels(d, "usdm")                                       # usdm, nass, tracks, landfalls
+read.variables(d)                                                # units and description of every variable
+```
+
+`read.composites()` sets the optical values of gap-filled periods (`n_optical_obs == 0`) to NaN unless you pass
+`observed_only=False`.
+
+### With xarray
+
 The examples assume the Zenodo files are in the folder you work in, or a rebuilt release in `data/release/v1.3/`.
 The cube opens directly from the zip:
 
@@ -58,7 +86,8 @@ observed = ndvi.where(cube.n_optical_obs.sel(field="FPC000123") > 0)     # drop 
 Gap-filled optical values are interpolated towards the next observation. Do not use them as inputs to a forecast or
 any other analysis that must be causal. The benchmark removes them with `fpcube.benchmark.tasks.observed_only`.
 
-To recover the release layout, unzip every zip in one folder (`unzip cube.zarr.zip -d cube.zarr`, the others as they
+To recover the release layout, put the `composites_YYYY.parquet` files in a folder `composites/` and unzip every
+zip in one folder (`unzip cube.zarr.zip -d cube.zarr`, the others as they
 are). Then `shasum -a 256 -c SHA256SUMS` checks every file, and `stac/catalog.json` describes them.
 
 ## Installation
@@ -100,7 +129,9 @@ earlier versions, and `lineage.parquet` links every field identifier to v1.0.
 v1.3 needs `python -m fpcube.sources.fluccs` and `python -m fpcube.sources.worldcover` first.
 
 After any version, run these with the same `FPCUBE_FIELDS`: `fpcube cube`, `python -m fpcube.validation <version>`,
-`python -m fpcube.benchmark.run --release <version>` and `python -m fpcube.release <version>`.
+`python -m fpcube.benchmark.run --release <version>`, `python -m fpcube.composites <version>` (the yearly Parquet
+composites) and `python -m fpcube.release <version>`. Add `--deposit` to the last command to build the files for
+Zenodo.
 
 PRISM values become stable about six months after the date. To refresh the provisional months, delete the latest
 yearly PRISM files under `data/raw/prism/`, then run `fpcube prism`, `fpcube cube` and the validation again.
