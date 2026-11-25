@@ -9,3 +9,6 @@ __pycache__/
 data/
 docs/
 .pytest_cache/
+
+# manuscript drafts are kept outside the public repository
+manuscript/
