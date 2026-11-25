@@ -175,9 +175,10 @@ def fig1(rel):
                     handleheight=1.1, labelspacing=0.9, borderaxespad=0)
     for t in leg.get_texts():
         t.set_color(INK)
-    ax.text(0.02, 0.36, f"{num(len(f))} persistent pasture fields\n{f.area_ha.sum() / 1e6:.2f} Mha",
+    ax.text(0.02, 0.36 if len(TIERS) < 3 else 0.43, f"{num(len(f))} persistent pasture fields\n{f.area_ha.sum() / 1e6:.2f} Mha",
             transform=ax.transAxes, fontsize=7, color=INK, va="bottom", fontweight="bold")
-    head(ax, "a", "Pasture fields of the Florida Pasture Cube", "fields delineated from CDL 2016–2025 and tax parcels")
+    head(ax, "a", "Pasture fields of the Florida Pasture Cube", "fields delineated from CDL 2016–2025 and tax parcels"
+         + ("; tier C from official land use" if "C" in TIERS else ""))
 
     # b: size distribution, share of fields and of field area
     axb = fig.add_subplot(gs[0, 1])
