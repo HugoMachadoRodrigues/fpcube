@@ -3,6 +3,8 @@ message: "If you use this software, please cite it as below. If you use the data
 title: "fpcube: processing code for the Florida Pasture Cube"
 type: software
 version: 1.3.0
+doi: 10.5281/zenodo.24542303
+date-released: 2026-11-25
 license: MIT
 repository-code: "https://github.com/HugoMachadoRodrigues/fpcube"
 authors:

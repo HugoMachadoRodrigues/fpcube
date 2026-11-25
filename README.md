@@ -1,5 +1,7 @@
 # fpcube: the Florida Pasture Cube
 
+[![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.24542303.svg)](https://doi.org/10.5281/zenodo.24542303)
+
 `fpcube` builds, validates and documents the **Florida Pasture Cube**, a field-level data set of Florida grazing
 lands. It covers 62,847 persistent pasture fields (0.98 Mha) with a 5-day time series from January 2016 to October
 2026 (791 periods):
@@ -18,7 +20,7 @@ observations it came from.
 | | |
 |---|---|
 | Data (v1.3) | Zenodo, DOI to be added on publication (CC BY 4.0) |
-| Code | this repository (MIT); archived on Zenodo with each release |
+| Code | this repository (MIT); archived on Zenodo with each release: [10.5281/zenodo.24542303](https://doi.org/10.5281/zenodo.24542303) (all versions), [10.5281/zenodo.24542304](https://doi.org/10.5281/zenodo.24542304) (1.3.0) |
 | Datasheet | `DATASHEET.md` in the data record |
 
 ## Fields
