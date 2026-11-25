@@ -1,6 +1,7 @@
 # fpcube: the Florida Pasture Cube
 
-[![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.24542303.svg)](https://doi.org/10.5281/zenodo.24542303)
+[![Code DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.24542303.svg)](https://doi.org/10.5281/zenodo.24542303)
+[![Data DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.24542431.svg)](https://doi.org/10.5281/zenodo.24542431)
 
 `fpcube` builds, validates and documents the **Florida Pasture Cube**, a field-level data set of Florida grazing
 lands. It covers 62,847 persistent pasture fields (0.98 Mha) with a 5-day time series from January 2016 to October
@@ -24,7 +25,7 @@ fields, composites, observations and labels, and adds drought classes, anomalies
 
 | | |
 |---|---|
-| Data (v1.3) | Zenodo, DOI to be added on publication (CC BY 4.0) |
+| Data (v1.3) | Zenodo, [10.5281/zenodo.24542431](https://doi.org/10.5281/zenodo.24542431) (CC BY 4.0); all versions: [10.5281/zenodo.24542430](https://doi.org/10.5281/zenodo.24542430) |
 | Code | this repository (MIT); archived on Zenodo with each release: [10.5281/zenodo.24542303](https://doi.org/10.5281/zenodo.24542303) (all versions), [10.5281/zenodo.24542304](https://doi.org/10.5281/zenodo.24542304) (1.3.0) |
 | Datasheet | `DATASHEET.md` in the data record |
 
@@ -170,8 +171,9 @@ Release v1.3 was produced by commit `db2b57d`, with code hash `1a5eb14ada85067b`
 
 ## Citation
 
-Cite the data set through its Zenodo DOI and this code through the DOI of the release you used (see
-`CITATION.cff`).
+Cite the data set as: Rodrigues, H. (2026). Florida Pasture Cube v1.3: field-level time series of persistent pasture
+fields in Florida, 2016-2026 [Data set]. Zenodo. https://doi.org/10.5281/zenodo.24542431. Cite this code through the
+DOI of the release you used (see `CITATION.cff`).
 
 ## Licence
 
