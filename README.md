@@ -26,7 +26,7 @@ fields, composites, observations and labels, and adds drought classes, anomalies
 | | |
 |---|---|
 | Data (v1.3) | Zenodo, [10.5281/zenodo.24542431](https://doi.org/10.5281/zenodo.24542431) (CC BY 4.0); all versions: [10.5281/zenodo.24542430](https://doi.org/10.5281/zenodo.24542430) |
-| Code | this repository (MIT); archived on Zenodo with each release: [10.5281/zenodo.24542303](https://doi.org/10.5281/zenodo.24542303) (all versions), [10.5281/zenodo.24542304](https://doi.org/10.5281/zenodo.24542304) (1.3.0) |
+| Code | this repository (MIT); archived on Zenodo with each release: [10.5281/zenodo.24542303](https://doi.org/10.5281/zenodo.24542303) (resolves to the latest version) |
 | Datasheet | `DATASHEET.md` in the data record |
 
 ## Fields

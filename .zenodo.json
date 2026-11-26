@@ -23,6 +23,6 @@
     "hurricanes",
     "machine learning benchmark"
   ],
-  "description": "<p>Python package that builds the Florida Pasture Cube from public sources (HLS, Sentinel-1 RTC, PRISM, gNATSGO, 3DEP, C-CAP, CDL, Florida parcel data, FLUCCS land use, ESA WorldCover, US Drought Monitor, NASS, HURDAT2), validates it, runs the three benchmark tasks and writes the release with its datasheet, STAC catalog and checksums.</p>",
-  "version": "1.3.0"
+  "description": "<p>Python package that builds the Florida Pasture Cube from public sources (HLS, Sentinel-1 RTC, PRISM, gNATSGO, 3DEP, C-CAP, CDL, Florida parcel data, FLUCCS land use, ESA WorldCover, US Drought Monitor, NASS, HURDAT2), validates it, runs the three benchmark tasks and writes the release with its yearly Parquet composites, datasheet, STAC catalog and checksums. The module fpcube.read reads a release in Python.</p>",
+  "version": "1.3.1"
 }

@@ -1,2 +1,2 @@
 """Florida Pasture Cube: field-level, AI-ready time series of Florida grazing lands."""
-__version__ = "1.0.0"
+__version__ = "1.3.1"
