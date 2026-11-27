@@ -7,10 +7,13 @@ The same functions as the R package fpcubeR (https://github.com/HugoMachadoRodri
     x = read.composites("data/release/v1.3", fields=f, vars=["ndvi", "vv_db", "ppt_sum"], years=[2022])
     x = read.add_drought("data/release/v1.3", x)
     a = read.anomaly(x, "ndvi", ref_years=[2021, 2022])
+    l = read.lineage("data/release/v1.3", parents="FPC057124")          # a version 1.0 field split in two
+    s = read.benchmark("data/release/v1.3", "task1_samples", fields=f)  # NDVI forecast samples with their split
 
-`dir` is a folder with the layout of the release: fields.parquet, composites/composites_YYYY.parquet, labels/,
-optical_observations/, radar_observations/. Optical values of gap-filled periods (n_optical_obs = 0) are
-interpolated from the next observation; `composites(observed_only=True)`, the default, sets them to NaN.
+`dir` is a folder with the layout of the release: fields.parquet, lineage.parquet, composites/composites_YYYY.parquet,
+labels/, optical_observations/, radar_observations/, validation/, benchmark/. Optical values of gap-filled periods
+(n_optical_obs = 0) are interpolated from the next observation; `composites(observed_only=True)`, the default, sets
+them to NaN.
 """
 import json
 import re
@@ -196,3 +199,188 @@ def anomaly(x, var, ref_years=None, min_years=2):
     y = y.merge(c[["field_id", "period", "clim"]], on=["field_id", "period"], how="left")
     y["anomaly"] = y[var] - y["clim"]
     return y
+
+
+# --- lineage, validation and benchmark tables ---------------------------------------------------------------------
+
+STATUSES = ("unchanged", "reshaped", "new", "removed")
+
+
+def _fpc_id(fid):
+    return [f"FPC{int(i):06d}" for i in fid]
+
+
+def lineage(dir, fields=None, parents=None, status=None):
+    """Field identifiers across versions: the version 1.0 field each field of this version comes from.
+
+    status is "unchanged" (same pixels and identifier as in version 1.0), "reshaped" (the largest part of a
+    version 1.0 field, which keeps its identifier), "new" (a further part of a version 1.0 field, or a tier C field,
+    which has no parent) or "removed" (a version 1.0 identifier that is no longer used). `fields` keeps fields of
+    this version, `parents` the rows that come from these version 1.0 fields (removed ones included).
+
+    Columns: field_id (NaN for removed identifiers), fid, status, parent_field_id and parent_fid (the version 1.0
+    field; NaN / <NA> when there is none), n_pixels (30 m pixels in this version) and obs_version (the version whose
+    observations the field's series use).
+    """
+    if status is not None:
+        status = [str(s) for s in np.atleast_1d(status)]
+        bad = [s for s in status if s not in STATUSES]
+        if bad:
+            raise ValueError(f"unknown status(es): {bad}; use {list(STATUSES)}")
+    x = pd.read_parquet(_need(Path(dir) / "lineage.parquet", "lineage"))
+    x["fid"] = x["fid"].astype("int64")
+    x["n_pixels"] = x["n_pixels"].astype("int64")
+    x["parent_fid"] = x["parent_fid"].astype("Int64").mask(x["parent_fid"] == 0)
+    x["field_id"] = pd.Series(_fpc_id(x["fid"]), index=x.index).where(x["status"] != "removed")
+    x["parent_field_id"] = pd.Series(_fpc_id(x["parent_fid"].fillna(0)), index=x.index).where(x["parent_fid"].notna())
+    if fields is not None:
+        x = x[x["field_id"].isin(_ids(fields))]
+    if parents is not None:
+        x = x[x["parent_field_id"].isin(_ids(parents))]
+    if status is not None:
+        x = x[x["status"].isin(status)]
+    cols = ["field_id", "fid", "status", "parent_field_id", "parent_fid", "n_pixels", "obs_version"]
+    return x.sort_values("fid")[cols].reset_index(drop=True)
+
+
+VALIDATION_TABLES = pd.DataFrame([
+    ("fluccs_by_field", "fluccs_by_field.csv",
+     "30 m pixels of each field in each FLUCCS land-use group, and the water management district"),
+    ("worldcover_by_field", "worldcover_by_field.csv", "share of each field in each ESA WorldCover 2021 class"),
+    ("coverage_by_year", "coverage_by_year.csv",
+     "median over fields of the usable optical days and the radar days, by year"),
+    ("quality_by_stratum", "quality_by_stratum.csv",
+     "observed, interpolated and empty shares and usable days by tier and field size"),
+    ("delineation_accounting", "delineation_accounting.csv", "area at each step of the field delineation"),
+    ("summary", "summary.json", "every number of the validation section (a dict)"),
+], columns=["table", "file", "description"])
+
+
+def _read_file(p):
+    p = Path(p)
+    if p.suffix == ".json":
+        return json.loads(p.read_text())
+    if p.suffix == ".parquet":
+        return pd.read_parquet(p)
+    return pd.read_csv(p)
+
+
+def validation(dir, table=None, fields=None):
+    """The tables behind the validation of the data set (Sect. 5 of the paper); table=None lists them.
+
+    fluccs_by_field and worldcover_by_field have one row per field, with field_id first; `fields` filters them.
+    In coverage_by_year the year column is named `year` (`day` in the file), and the size classes of
+    quality_by_stratum are plain text ("2-5 ha", ">=100 ha"). summary is a dict.
+    """
+    sub = _need(Path(dir) / "validation", "validation")
+    tabs = VALIDATION_TABLES
+    if table is None:
+        return tabs.copy()
+    if table not in set(tabs["table"]):
+        raise ValueError(f"unknown validation table {table!r}; see read.validation(dir)")
+    per_field = table in ("fluccs_by_field", "worldcover_by_field")
+    if fields is not None and not per_field:
+        raise ValueError("`fields` applies only to the per-field tables")
+    x = _read_file(_need(sub / tabs.set_index("table").at[table, "file"], "validation"))
+    if per_field:
+        x["fid"] = x["fid"].astype("int64")
+        x.insert(0, "field_id", _fpc_id(x["fid"]))
+        x = x[["field_id", "fid", *[c for c in x.columns if c not in ("field_id", "fid")]]]
+        if fields is not None:
+            x = x[x["field_id"].isin(_ids(fields))]
+        x = x.sort_values("fid").reset_index(drop=True)
+    if table == "coverage_by_year":
+        x = x.rename(columns={"day": "year"})
+    if table == "quality_by_stratum":
+        x["size"] = x["size"].str.replace("--", "-", regex=False).str.replace("$\\geq$", ">=", regex=False)
+    return x
+
+
+BENCHMARK_DESCRIPTIONS = {
+    "task1_samples": "field, issue date and horizon of every NDVI forecast sample, with the split",
+    "task1_results": "RMSE, MAE, bias, R2 and skill by split, horizon and model, with 95% intervals",
+    "task1_lightgbm_importance": "gain of every LightGBM feature",
+    "task1_run_info": "code version, dates and sample counts of the run (a dict)",
+    "task2_events": "events with their kind, date, name and numbers of responding and other fields",
+    "task2_results": "AUROC, AUPRC and F1 by experiment, event and model",
+    "task2_run_info": "code version and dates of the run (a dict)",
+    "task3_samples": "county, week, target and split of every drought-transition sample",
+    "task3_predictions": "predictions of every model for the test samples",
+    "task3_results": "macro F1, balanced accuracy and recall per class by split and model",
+    "task3_field_evidence_gain": "AUROC gain from field evidence, with 95% interval",
+    "task3_run_info": "code version, dates and dropped samples of the run (a dict)",
+    "benchmark_text": "every number of the benchmark section (a dict)",
+}
+
+
+def _benchmark_description(table):
+    if table in BENCHMARK_DESCRIPTIONS:
+        return BENCHMARK_DESCRIPTIONS[table]
+    if table.startswith("task3_confusion_"):
+        return f"confusion matrix of {table[len('task3_confusion_'):]} (rows observed, columns predicted)"
+    return ""
+
+
+def benchmark(dir, table=None, fields=None):
+    """The samples, scores, predictions and run information of the three benchmark tasks; table=None lists them.
+
+    Task 1 forecasts the field NDVI 15 to 60 days ahead, task 2 detects the fields that responded to an extreme
+    event, task 3 forecasts the change of the county drought class. `table` is a file name without extension.
+    task1_samples stores each sample as positions in cube.zarr (f, t, h), which are kept; field_id, issue_date,
+    horizon_days, target_start and target_end are added from fields.parquet, and `fields` filters the samples (12
+    million rows in all). The task 3 confusion matrices have the observed class in rows (column `observed`) and the
+    predicted class in columns. The run_info and benchmark_text files are dicts.
+    """
+    sub = _need(Path(dir) / "benchmark", "benchmark")
+    files = sorted(p.name for p in sub.iterdir() if p.suffix in (".csv", ".parquet", ".json"))
+    stems = [Path(f).stem for f in files]
+    tabs = pd.DataFrame({
+        "table": stems,
+        "task": pd.array([int(m.group(1)) if (m := re.match(r"task(\d)", s)) else None for s in stems],
+                         dtype="Int64"),
+        "file": files,
+        "description": [_benchmark_description(s) for s in stems]})
+    if table is None:
+        return tabs
+    if table not in stems:
+        raise ValueError(f"unknown benchmark table {table!r}; see read.benchmark(dir)")
+    if fields is not None and table != "task1_samples":
+        raise ValueError("`fields` applies only to task1_samples")
+    path = sub / files[stems.index(table)]
+    if table == "task1_samples":
+        return _task1_samples(dir, path, fields)
+    x = _read_file(path)
+    if table.startswith("task3_confusion_"):
+        x = x.rename(columns={x.columns[0]: "observed"})
+    if table == "task1_lightgbm_importance":
+        x.columns = ["feature", "gain"]
+    if table == "task2_events":
+        x["date"] = pd.to_datetime(x["date"])
+    return x
+
+
+ORIGIN = pd.Timestamp("2016-01-01")   # the 5-day periods of the cube are anchored on 1 January 2016
+
+
+def period_start(t):
+    """First day of cube period t (0-based): 1 January 2016 + 5 t days."""
+    return ORIGIN + pd.to_timedelta(5 * np.asarray(t, dtype="int64"), unit="D")
+
+
+def _task1_samples(dir, path, fields):
+    # cube.zarr has the fields in the order of fields.parquet; f is the 0-based row
+    ids = np.asarray(pq.read_table(_need(Path(dir) / "fields.parquet", "fields"), columns=["field_id"])
+                     .column("field_id").to_pylist(), dtype=object)
+    expr = None
+    if fields is not None:
+        pos = pd.Index(ids).get_indexer(_ids(fields))
+        expr = ds.field("f").isin([int(i) for i in pos[pos >= 0]])
+    x = ds.dataset(str(path)).to_table(filter=expr).to_pandas()
+    f, t, h = (x[k].to_numpy(dtype="int64") for k in ("f", "t", "h"))
+    if len(f) and f.max() >= len(ids):
+        raise ValueError(f"task1_samples does not match fields.parquet in {dir}")
+    target = period_start(t + h - 1)
+    out = pd.DataFrame({"field_id": ids[f], "issue_date": period_start(t), "horizon_days": 5 * h,
+                        "target_start": target, "target_end": target + pd.Timedelta(days=4),
+                        "split": x["split"].to_numpy(), "f": f, "t": t, "h": h})
+    return out

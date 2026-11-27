@@ -62,10 +62,17 @@ a = read.anomaly(read.composites(d, fields=f, vars=["ndvi"]), "ndvi", ref_years=
 o = read.observations(d, "optical", fields=f, years=[2022])     # per-acquisition HLS records (qa_use)
 u = read.labels(d, "usdm")                                       # usdm, nass, tracks, landfalls
 read.variables(d)                                                # units and description of every variable
+l = read.lineage(d, parents="FPC057124")                         # version 1.0 field FPC057124, split in two
+read.validation(d)                                               # lists the validation tables
+w = read.validation(d, "worldcover_by_field", fields=f)          # ESA WorldCover share of each field
+read.benchmark(d)                                                # lists the benchmark samples and results
+s = read.benchmark(d, "task1_samples", fields=f)                 # NDVI forecast samples, dates and split
 ```
 
 `read.composites()` sets the optical values of gap-filled periods (`n_optical_obs == 0`) to NaN unless you pass
-`observed_only=False`.
+`observed_only=False`. `read.benchmark(d, "task1_samples")` keeps the positions of each sample in `cube.zarr`
+(`f`, `t`, `h`) and adds the field identifier, the issue date, the horizon and the target period. The lineage,
+validation and benchmark readers are in the development version (after 1.3.1).
 
 ### With xarray
 
